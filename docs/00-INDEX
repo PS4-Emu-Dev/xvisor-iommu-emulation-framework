@@ -1,0 +1,26 @@
+
+Below is a brief list of all the files in ./xvisor/docs and what
+they contain. If you add a documentation file/directory under
+./xvisor/docs then please list it here in alphabetical order.
+Please try and keep the descriptions small enough to fit on one line.
+						Thanks --Anup Patel
+
+00-INDEX
+	- This file.
+releases/
+	- Detailed information about each release.
+DesignDoc
+	- Overview of Xvisor design.
+VersionScheme
+	- Explanation about Xvisor Version Scheme.
+CodingStyle
+	- Expected C coding style in Xvisor.
+DriverPorting
+	- Recommendation for porint driver from Linux to Xvisor.
+arm/
+	- ARM architecture support documentation.
+riscv/
+	- RISC-V architecture support documentation.
+x86/
+	- x86 architecture support documentation.
+

@@ -1,0 +1,67 @@
+			Xvisor v0.2.7
+	(Last Commit: 375b8c569071cb8bf543af8b52477e0480f93100)
+		(Release Date: 14-Nov-2015)
+
+In this release, we have lot of new features, drivers, emulators,
+and improvements.
+
+New Features:
+ - Simple light-weight serial port driver framework
+ - Boot-time initrd block device creation from device tree
+ - Support multiple banks of host RAM
+ - More Linux-like DMA mapping APIs
+ - Linux compatible NAPI APIs
+ - Logical SMP IDs for host CPUs based their boot-order
+ - Support for marking a host IRQ as inter-processor interrupt
+ - Generic exceptions table APIs
+ - Separate per-CPU irq handler for per-CPU host IRQs
+ - Generic PA->VA mappings API using rbtree based hash
+ - Memory read/write relaxed legacy APIs
+ - Linux-like vmm_host_irqdomain APIs which handles both static
+   and extended host IRQs
+ - Priority-based rate monotonic scheduling algorithm
+ - Support for async-IPI based wakeup from wait-for-interrupt
+ - Allow guest regions to be added from emulator probe
+ - Emulated irqchip construct (i.e. vmm_devemu_irqchip) in
+   device emulation framework
+
+New Commands:
+ - mii command similar to Linux mii-tool
+ - sleep command similar to bash's sleep command
+ - echo command similar to bash's echo command
+ - set_affinity sub-command for host irq command
+ - module_load sub-command for vfs command
+
+New Drivers:
+ - Micrel PHY driver
+ - i.MX6 FEC ethernet driver
+ - BCM2836 local INTC irqchip driver
+ - i.mx25 clock driver
+ - i.MX25 pin control driver
+
+New Emulators:
+ - Generic PCIe host controller emulator (EXPERIEMENTAL)
+ - Simple pass-through emulator
+
+ARM Ports:
+ -  Use vmm_host_irq_find() to find appropriate IPI for
+    architecture specific IPI callbacks
+
+ARM32ve Port:
+ - Lazy context switching of VFP/ASIMD registers
+ - Force disable coprocessor and system traps in VCPU init
+ - Raspberry Pi2 (BCM2836 SOC) board support
+
+ARM64 Port:
+ - Force disable coprocessor and system traps in VCPU init
+ - Added invalidate_dcache_mva() and invalidate_dcache_mva_range()
+
+x86 Port:
+ - Fix for a crash on multi-IOAPIC system.
+ - A lot in port of Intel VMX (currently in nascent state).
+ - Support for passing initrd to xvisor as root FS.
+ - Arch implementation of memcpy.
+ - Default console now can be overridden with console bootrags
+ - Boot time script for mounting root.
+ - Wait for block device settling.
+ - Tested boot on Intel and AMD based desk/laptops.

@@ -1,0 +1,25 @@
+
+/dts-v1/;
+
+#include "./zynqmp.dtsi"
+
+/ {
+	model = "Xilinx zynqmp zcu102 board";
+	compatible = "xlnx,zynqmp-zcu102";
+
+	chosen {
+		console = &uart0;
+		bootcmd = /* Mount initrd device */
+			  "vfs mount initrd /",
+
+			  /* Run boot script */
+			  "vfs run /boot.xscript",
+
+			  /* Print banner */
+			  "vfs cat /system/banner.txt";
+	};
+};
+
+&uart0 {
+	status = "okay";
+};

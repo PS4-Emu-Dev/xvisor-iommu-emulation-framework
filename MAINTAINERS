@@ -1,0 +1,122 @@
+			Xvisor History
+
+This project was started by Anup Patel as an experimental test code. Later,
+Himanshu Chauhan, Pranav Sawargaonkar, Sukanto Ghosh, Jean-Christophe Dubois,
+and others joined Anup to re-designed/re-write it from scratch and make it
+flexible & portable accross architectures.
+
+
+	Maintainers List (try to look for most precise areas first)
+
+Note: This list is meant to remain in alphabetical order. If you could
+add yourselves to it in alphabetical order that would be so much easier [Ed]
+
+P: Person
+M: Mail patches to
+L: Mailing list that is relevant to this area
+W: Web-page with status/info
+T: SCM tree type and location.  Type is one of: git, hg, quilt.
+S: Status, one of the following:
+
+	Supported:	Someone is actually paid to look after this.
+	Maintained:	Someone actually looks after it.
+	Odd Fixes:	It has a maintainer but they don't have time to do
+			much other than throw the odd patch in. See below..
+	Orphan:		No current maintainer [but maybe you could take the
+			role as you write your new code].
+	Obsolete:	Old code. Something tagged obsolete generally means
+			it has been replaced by a better system and you
+			should be using that.
+
+F: Files and directories with wildcard patterns.
+   A trailing slash includes all files and subdirectory files.
+	F:	drivers/net/	all files in and below drivers/net
+	F:	drivers/net/*	all files in drivers/net, but not below
+	F:	*/net/*		all files in "any top level directory"/net
+   One pattern per line.  Multiple F: lines acceptable.
+X: Files and directories that are NOT maintained, same rules as F:
+   Files exclusions are tested before file matches.
+   Can be useful for excluding a specific subdirectory, for instance:
+	F:	net/
+	X:	net/ipv6/
+   matches all files in and below net excluding net/ipv6/
+
+ARM64
+P:	Sukanto Ghosh
+M:	sukantoghosh@gmail.com
+S:	Maintained
+L:	xvisor-devel@googlegroups.com
+F:	arch/arm64/*
+
+HEAP MANAGMENT
+P:	Himanshu Chauhan
+M:	hschauhan@nulltrace.org
+S:	Maintained
+L:	xvisor-devel@googlegroups.com
+F:	core/mm/*
+F:	core/include/mm/*
+F:	core/include/vmm_heap.h
+
+HOST ADDRESS SPACE APIs
+P:	Himanshu Chauhan
+M:	hschauhan@nulltrace.org
+S:	Maintained
+L:	xvisor-devel@googlegroups.com
+F:	core/include/vmm_host_aspace.h
+F:	core/include/vmm_host_aspace.c
+
+HOST IO APIs
+P:	Himanshu Chauhan
+M:	hschauhan@nulltrace.org
+S:	Maintained
+L:	xvisor-devel@googlegroups.com
+F:	core/include/vmm_host_io.h
+
+HYPERVISOR PROFILER
+P:	Jean-Christophe Dubois
+M:	jcd@tribudubois.net
+S:	Maintained
+L:	xvisor-devel@googlegroups.com
+F:	core/include/vmm_profiler.h
+F:	core/vmm_profiler.c
+
+INTEL64(x86-64)
+P:	Himanshu Chauhan
+M:	hschauhan@nulltrace.org
+S:	Maintained
+L:	xvisor-devel@googlegroups.com
+F:	arch/x86/*
+
+NETWORK CORE
+P:	Pranavkumar Sawargaonkar
+M:	pranav.sawargaonkar@gmail.com
+P:	Sukanto Ghosh
+M:	sukantoghosh@gmail.com
+S:	Maintained
+L:	xvisor-devel@googlegroups.com
+F:	core/net/*
+
+NETWORK DRIVERS
+P:	Pranavkumar Sawargaonkar
+M:	pranav.sawargaonkar@gmail.com
+P:	Sukanto Ghosh
+M:	sukantoghosh@gmail.com
+S:	Maintained
+L:	xvisor-devel@googlegroups.com
+F:	drivers/net/*
+
+NETWORK EMULATORS
+P:	Pranavkumar Sawargaonkar
+M:	pranav.sawargaonkar@gmail.com
+P:	Sukanto Ghosh
+M:	sukantoghosh@gmail.com
+S:	Maintained
+L:	xvisor-devel@googlegroups.com
+F:	emulators/net/*
+
+THE REST
+P:	Anup Patel
+M:	anup@brainfault.org
+M:	xvisor@brainfault.org
+T:	git git://github.com/xvisor/xvisor.git
+

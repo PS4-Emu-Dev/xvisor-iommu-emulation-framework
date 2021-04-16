@@ -1,0 +1,47 @@
+
+/dts-v1/;
+
+/include/ "bcm2837.dtsi"
+
+/ {
+	compatible = "raspberrypi,3-model-b", "brcm,bcm2837";
+	model = "Raspberry Pi 3 Model B";
+
+	chosen {
+		console = &SERIAL_MU;
+		bootcmd = /* Mount initrd device */
+			  "vfs mount initrd /",
+
+			  /* Run boot script */
+			  "vfs run /boot.xscript",
+
+			  /* Print banner */
+			  "vfs cat /system/banner.txt";
+	};
+};
+
+&soc {
+	firmware: firmware {
+		compatible = "raspberrypi,bcm2835-firmware";
+		mboxes = <&mailbox>;
+	};
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <100000>;
+};
+
+&i2c1 {
+	status = "okay";
+	clock-frequency = <100000>;
+};
+
+&sdhci {
+	status = "okay";
+	bus-width = <4>;
+};
+
+&usb {
+	status = "okay";
+};

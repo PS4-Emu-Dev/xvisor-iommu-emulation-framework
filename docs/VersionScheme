@@ -1,0 +1,26 @@
+
+		Xvisor Version Scheme
+
+The Xvisor Version Scheme is intended to capture the progress of Xvisor 
+in-terms of feature additions. 
+
+The Xvisor Version Scheme is as follow:
+
+ 1. We use 3 numbers major, minor, and release for version numbers. 
+    We write this in following format: 
+               <major> . <minor> . <release>
+ 2. We will increase <release> number after 5+ feature additions. 
+    The addition of new port, driver, emulator, library, command, and daemons 
+    will also be considered as new feature.
+ 3. There is no limit on <release> number, it will keep increasing.
+    The <release> number will be reset 0 only when we increment <minor> number.
+ 4. We will increase <minor> number on reaching a milestone. Examples of
+    milestones could be First release, SMP support, Network support, etc.
+ 5. There is no limit on <minor> number, it will keep increasing.
+    The <minor> number will be reset 0 only when we increment <major> number.
+ 6. Increasing <major> number will be based on discussions on xvisor-devel 
+    mailing list.
+
+In the above, point 2 is based on our current pace of development. 
+In future, we will keep adapting point 2 based on pace of development at that 
+time such that <release> number will increase at a steady rate.

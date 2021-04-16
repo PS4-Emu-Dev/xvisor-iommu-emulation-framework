@@ -1,0 +1,33 @@
+/*
+ * ARMv8 Foundation model DTS (GICv2 configuration)
+ */
+
+/dts-v1/;
+
+#include "foundation-v8.dtsi"
+
+/ {
+	chosen {
+		console = &SERIAL0;
+		rtcdev = &RTC0;
+		bootcmd = /* Mount initrd device */
+			  "vfs mount initrd /",
+
+			  /* Run boot script */
+			  "vfs run /boot.xscript",
+
+			  /* Print banner */
+			  "vfs cat /system/banner.txt";
+	};
+
+	gic: interrupt-controller@2c001000 {
+		compatible = "arm,cortex-a15-gic";
+		reg = <0x0 0x2c001000 0x0 0x1000	/* GIC Dist */
+		       0x0 0x2c002000 0x0 0x2000	/* GIC CPU */
+		       0x0 0x2c004000 0x0 0x2000	/* GIC VCPU Control */
+		       0x0 0x2c006000 0x0 0x2000>;	/* GIC VCPU */
+		#interrupt-cells = <3>;
+		interrupt-controller;
+		interrupts = <GIC_PPI 9 (GIC_CPU_MASK_SIMPLE(6) | IRQ_TYPE_LEVEL_HIGH)>;
+	};
+};

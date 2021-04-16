@@ -1,0 +1,62 @@
+		Basic Firmware on Virt64 Guest
+
+The basic firmware currently sets up PIC, Timer, and UART and emulates
+a dummy terminal which reponds to various commands.
+
+Please follow the steps below to build & run Basic Firmware on Virt64
+Guest with Xvisor running on QEMU (v3.1.50 or higher):
+
+  [1. Build environment for Xvisor]
+  # CROSS_COMPILE=riscv64-unknown-linux-gnu-
+
+  [2. GoTo Xvisor source directory]
+  # cd <xvisor_source_directory>
+
+  [3. Configure Xvisor with Generic-64bit default settings]
+  # make ARCH=riscv generic-64b-defconfig
+
+  [4. Build Xvisor & DTBs]
+  # make
+
+  [5. Build Basic Firmware]
+  # make -C tests/riscv/virt64/basic
+
+  [6. Create disk image for Xvisor]
+  # mkdir -p ./build/disk/tmp
+  # mkdir -p ./build/disk/system
+  # cp -f ./docs/banner/roman.txt ./build/disk/system/banner.txt
+  # cp -f ./docs/logo/xvisor_logo_name.ppm ./build/disk/system/logo.ppm
+  # mkdir -p ./build/disk/images/riscv/virt64
+  # dtc -q -I dts -O dtb -o ./build/disk/images/riscv/virt64-guest.dtb ./tests/riscv/virt64/virt64-guest.dts
+  # cp -f ./build/tests/riscv/virt64/basic/firmware.bin ./build/disk/images/riscv/virt64/firmware.bin
+  # cp -f ./tests/riscv/virt64/basic/nor_flash.list ./build/disk/images/riscv/virt64/nor_flash.list
+  # cp -f ./tests/riscv/virt64/xscript/one_guest_virt64.xscript ./build/disk/boot.xscript
+  # genext2fs -B 1024 -b 32768 -d ./build/disk ./build/disk.img
+
+  [7. Launch QEMU]
+  # qemu-system-riscv64 -cpu rv64,x-h=true -M virt -m 512M -display none -serial stdio -bios <opensbi_build_directory>/platform/qemu/virt/firmware/fw_jump.bin -kernel ./build/vmm.bin -initrd ./build/disk.img -append "vmm.console=uart@10000000 vmm.rtcdev=rtc@101000 vmm.bootcmd=\"vfs mount initrd /;vfs run /boot.xscript;vfs cat /system/banner.txt\""
+
+  [8. Kick Guest0 for starting Basic Firmware]
+  XVisor# guest kick guest0
+
+  [9. Bind to virtual UART]
+  XVisor# vserial bind guest0/uart0
+
+  [11. Say 'hi' to Basic Firmware]
+  [guest0/uart0] basic# hi
+
+  [12. Say 'hello' to Basic Firmware]
+  [guest0/uart0] basic# hello
+
+  [13. Check various commands of Basic Firmware]
+  [guest0/uart0] basic# help
+
+  [14. Enter character seqence 'ESCAPE+x+q" return to Xvisor prompt]
+  [guest0/uart0] basic#
+
+  (Note: replace all <> brackets based on your workspace)
+  (Note: some of the above steps will need to be adapted for other
+   types of RISC-V host)
+  (Note: for more info on your desired RISC-V host refer docs/riscv/)
+  (Note: you are free to change the ordering of above steps based
+   on your workspace)

@@ -1,0 +1,176 @@
+/**
+ * Copyright (c) 2012 Anup Patel.
+ * All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *
+ * @file vmm_delay.c
+ * @author Anup Patel (anup@brainfault.org)
+ * @brief source file for soft delay subsystem
+ */
+
+#include <vmm_error.h>
+#include <vmm_smp.h>
+#include <vmm_cpuhp.h>
+#include <vmm_stdio.h>
+#include <vmm_timer.h>
+#include <vmm_waitqueue.h>
+#include <vmm_delay.h>
+#include <arch_delay.h>
+#include <arch_cpu.h>
+#include <libs/mathlib.h>
+
+static unsigned long loops_per_msec[CONFIG_CPU_COUNT];
+static unsigned long loops_per_usec[CONFIG_CPU_COUNT];
+static unsigned long loops_per_nsec[CONFIG_CPU_COUNT];
+
+static void nanosec_sleep(u64 nsecs)
+{
+	int rc;
+	struct vmm_waitqueue wq;
+
+	INIT_WAITQUEUE(&wq, NULL);
+
+	rc = vmm_waitqueue_sleep_timeout(&wq, &nsecs);
+	if (rc != VMM_ETIMEDOUT) {
+		vmm_printf("%s: sleep timeout failed (error %d)\n",
+			   __func__, rc);
+		WARN_ON(1);
+	}
+}
+
+void vmm_usleep(unsigned long usecs)
+{
+	nanosec_sleep((u64)usecs * 1000ULL);
+}
+
+void vmm_msleep(unsigned long msecs)
+{
+	nanosec_sleep((u64)msecs * 1000000ULL);
+}
+
+void vmm_ssleep(unsigned long secs)
+{
+	nanosec_sleep((u64)secs * 1000000000ULL);
+}
+
+void vmm_ndelay(unsigned long nsecs)
+{
+	unsigned long lpnsec;
+	irq_flags_t flags;
+
+	arch_cpu_irq_save(flags);
+	lpnsec = loops_per_nsec[vmm_smp_processor_id()];
+	arch_cpu_irq_restore(flags);
+
+	arch_delay_loop(nsecs * lpnsec);
+}
+
+void vmm_udelay(unsigned long usecs)
+{
+	unsigned long lpusec;
+	irq_flags_t flags;
+
+	arch_cpu_irq_save(flags);
+	lpusec = loops_per_usec[vmm_smp_processor_id()];
+	arch_cpu_irq_restore(flags);
+
+	arch_delay_loop(usecs * lpusec);
+}
+
+void vmm_mdelay(unsigned long msecs)
+{
+	unsigned long lpmsec;
+	irq_flags_t flags;
+
+	arch_cpu_irq_save(flags);
+	lpmsec = loops_per_msec[vmm_smp_processor_id()];
+	arch_cpu_irq_restore(flags);
+
+	arch_delay_loop(msecs * lpmsec);
+}
+
+void vmm_sdelay(unsigned long secs)
+{
+	u32 i;
+	unsigned long lpmsec;
+	irq_flags_t flags;
+
+	arch_cpu_irq_save(flags);
+	lpmsec = loops_per_msec[vmm_smp_processor_id()];
+	arch_cpu_irq_restore(flags);
+
+	for (i = 0; i < secs; i++) {
+		arch_delay_loop(1000 * lpmsec);
+	}
+}
+
+unsigned long vmm_delay_estimate_cpu_mhz(u32 cpu)
+{
+	return arch_delay_loop_cycles(loops_per_usec[cpu]);
+}
+
+unsigned long vmm_delay_estimate_cpu_khz(u32 cpu)
+{
+	return arch_delay_loop_cycles(loops_per_msec[cpu]);
+}
+
+void vmm_delay_recaliberate(void)
+{
+	u64 nsecs, tstamp;
+	irq_flags_t flags;
+	u32 cpu = vmm_smp_processor_id();
+
+	arch_cpu_irq_save(flags);
+
+	tstamp = vmm_timer_timestamp();
+
+	arch_delay_loop(1000000);
+
+	nsecs = vmm_timer_timestamp() - tstamp;
+
+	loops_per_nsec[cpu] = udiv64(1000000ULL, nsecs);
+	loops_per_usec[cpu] = udiv64(1000ULL * 1000000ULL, nsecs);
+	loops_per_msec[cpu] = udiv64(1000000ULL * 1000000ULL, nsecs);
+
+	arch_cpu_irq_restore(flags);
+}
+
+static int delay_startup(struct vmm_cpuhp_notify *cpuhp, u32 cpu)
+{
+	vmm_delay_recaliberate();
+
+	return VMM_OK;
+}
+
+static struct vmm_cpuhp_notify delay_cpuhp = {
+	.name = "DELAY",
+	.state = VMM_CPUHP_STATE_DELAY,
+	.startup = delay_startup,
+};
+
+int __init vmm_delay_init(void)
+{
+	u32 i;
+
+	/* Clear everything */
+	for (i = 0; i < CONFIG_CPU_COUNT; i++) {
+		loops_per_msec[i] = 0;
+		loops_per_usec[i] = 0;
+	}
+
+	/* Setup hotplug notifier */
+	return vmm_cpuhp_register(&delay_cpuhp, TRUE);
+}

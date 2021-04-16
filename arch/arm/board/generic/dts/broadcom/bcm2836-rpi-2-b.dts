@@ -1,0 +1,58 @@
+
+/dts-v1/;
+
+/include/ "bcm2836.dtsi"
+
+/ {
+	compatible = "raspberrypi2,model-b", "brcm,bcm2836";
+	model = "Raspberry Pi2 Model B";
+
+	chosen {
+		console = &SERIAL0;
+		bootcmd = /* Mount initrd device */
+			  "vfs mount initrd /",
+
+			  /* Run boot script */
+			  "vfs run /boot.xscript",
+
+			  /* Print banner */
+			  "vfs cat /system/banner.txt";
+	};
+};
+
+&soc {
+	firmware: firmware {
+		compatible = "raspberrypi,bcm2835-firmware";
+		mboxes = <&mailbox>;
+	};
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <100000>;
+};
+
+&i2c1 {
+	status = "okay";
+	clock-frequency = <100000>;
+};
+
+&sdhci {
+	status = "okay";
+	bus-width = <4>;
+};
+
+&spi0 {
+	status = "okay";
+	spidev@0{
+		compatible = "spidev";
+		reg = <0>;      /* CE0 */
+		spi-max-frequency = <500000>;
+	};
+
+	spidev@1{
+		compatible = "spidev";
+		reg = <1>;      /* CE1 */
+		spi-max-frequency = <500000>;
+	};
+};

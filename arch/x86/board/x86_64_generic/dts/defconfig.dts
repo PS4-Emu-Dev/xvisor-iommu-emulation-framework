@@ -1,0 +1,83 @@
+
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "x86_64_generic";
+
+	aliases { };
+
+	cpus {
+		cpu0 {
+			device_type = "cpu";
+			model = "Intel x86_64 Family";
+		};
+	};
+
+	memory { 
+		device_type = "memory"; 
+		reg = <0x0 0x00100000 0x0 0x10000000>; /* 256 MB */
+	};
+
+	motherboard {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		compatible = "simple-bus";
+
+		ps2 {
+			compatible = "i8042";
+		};
+
+		ide {
+			compatible = "piix3_ide";
+		};
+
+		pci_host {
+			device_type = "pci";
+			compatible = "x86-legacy";
+		};
+
+		STDOUT: vga {
+		};
+
+		SERIAL0: uart0 {
+			compatible = "ns8250";
+			reg = <0x3f8>;
+			address_type = "io";
+			baudrate = <115200>;
+			interrupts = <4>;
+			clock-frequency = <24000000>;
+		};
+
+		SERIAL1: uart1 {
+			compatible = "ns8250";
+			reg = <0x2f8>;
+			address_type = "io";
+			baudrate = <115200>;
+			interrupts = <3>;
+			clock-frequency = <24000000>;
+		};
+	};
+
+	vmm {
+		net {
+			br0 {
+				device_type = "netswitch";
+				compatible = "bridge";
+			};
+		};
+	};
+
+	chosen {
+		console = &SERIAL0;
+		bootcmd = "echo Waiting for 3 seconds to let block devices settle down...",
+			  "sleep 3", /* Let block devices settle down */
+			  "vfs mount hda0p0 /",
+
+			  /* Kick off the startup script */
+			  "vfs run /system/init/startup";
+	};
+};
+
+/include/ "../../../guests/x86_64_guest.dtsi"

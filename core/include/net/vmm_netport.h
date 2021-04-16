@@ -1,0 +1,115 @@
+/**
+ * Copyright (c) 2012 Sukanto Ghosh.
+ * All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *
+ * @file vmm_netport.h
+ * @author Sukanto Ghosh <sukantoghosh@gmail.com>
+ * @brief Switch interface layer API.
+ */
+
+#ifndef __VMM_NETPORT_H_
+#define __VMM_NETPORT_H_
+
+#include <vmm_limits.h>
+#include <vmm_types.h>
+#include <vmm_devdrv.h>
+#include <vmm_spinlocks.h>
+#include <libs/list.h>
+
+#define VMM_NETPORT_CLASS_NAME		"netport"
+
+/* Port Flags (should be defined as bits) */
+#define VMM_NETPORT_LINK_UP		1	/* If this bit is set link is up */
+
+/* Default per-port queue size */
+#define VMM_NETPORT_MAX_QUEUE_SIZE	256
+
+/* Default per-port queue size */
+#define VMM_NETPORT_DEF_QUEUE_SIZE	(VMM_NETPORT_MAX_QUEUE_SIZE / 4)
+
+struct vmm_netswitch;
+struct vmm_netport;
+struct vmm_mbuf;
+
+struct vmm_netport_lazy {
+	struct vmm_netport *port;
+	atomic_t sched_count;
+	struct dlist head;
+	int budget;
+	void *arg;
+	void (*xfer)(struct vmm_netport *, void *, int);
+};
+
+#define INIT_NETPORT_LAZY(__lazy, __port, __budget, __arg, __xfer)	\
+do { \
+	(__lazy)->port = (__port); \
+	ARCH_ATOMIC_INIT(&(__lazy)->sched_count, 0); \
+	INIT_LIST_HEAD(&(__lazy)->head); \
+	(__lazy)->budget = (__budget); \
+	(__lazy)->arg = (__arg); \
+	(__lazy)->xfer = (__xfer); \
+} while (0)
+
+struct vmm_netport {
+	struct dlist head;
+	char name[VMM_FIELD_NAME_SIZE];
+	u32 queue_size;
+	int flags;
+	int mtu;
+	u8 macaddr[6];
+	struct vmm_netswitch *nsw;
+	struct vmm_device dev;
+
+	/* Link status changed */
+	void (*link_changed) (struct vmm_netport *);
+	/* Callback to determine if the port can RX */
+	int (*can_receive) (struct vmm_netport *);
+	/* Handle RX from switch to port */
+	vmm_spinlock_t switch2port_xfer_lock;
+	int (*switch2port_xfer) (struct vmm_netport *, struct vmm_mbuf *);
+	/* Port private data */
+	void *priv;
+};
+
+#define list_port(node)		(container_of((node), struct vmm_netport, head))
+
+/** Allocate new netport */
+struct vmm_netport *vmm_netport_alloc(char *name, u32 queue_size);
+
+/** Free netport */
+int vmm_netport_free(struct vmm_netport *port);
+
+/** Register netport to networking framework */
+int vmm_netport_register(struct vmm_netport *port);
+
+/** Unregister netport from networking framework */
+int vmm_netport_unregister(struct vmm_netport *port);
+
+/** Find a netport in networking framework */
+struct vmm_netport *vmm_netport_find(const char *name);
+
+/** Iterate over each netport in networking framework */
+int vmm_netport_iterate(struct vmm_netport *start, void *data,
+			int (*fn)(struct vmm_netport *dev, void *data));
+
+/** Count number of netports */
+u32 vmm_netport_count(void);
+
+/** Get pointer to port mac address */
+#define vmm_netport_mac(port)	((port)->macaddr)
+
+#endif /* __VMM_NETPORT_H_ */
