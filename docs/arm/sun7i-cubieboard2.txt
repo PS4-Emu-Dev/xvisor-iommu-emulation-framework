@@ -26,7 +26,7 @@ Following are steps to create these images and then boot Xvisor on Allwinner
 A20:
 
   [1. Build environment]
-  # export CROSS_COMPILE=arm-linux-gnueabi-
+  # export CROSS_COMPILE=arm-none-linux-gnueabihf-
 
   [2. GoTo Xvisor source directory]
   # cd <xvisor_source_directory>
@@ -96,7 +96,7 @@ A20:
 
   [16. Copy uvmm.bin, DTB, and disk.img to data partition of SD card]
   # cp -f build/uvmm.bin <path_to_mounted_data_partition_of_sd_card>
-  # cp -f build/arch/arm/board/generic/dts/allwinner/sun7i-a20-cubieboard2.dtb <path_to_mounted_data_partition_of_sd_card>
+  # cp -f build/arch/arm/dts/allwinner/sun7i-a20-cubieboard2.dtb <path_to_mounted_data_partition_of_sd_card>
   # cp -f build/udisk.img <path_to_mounted_data_partition_of_sd_card>
 
   [17. Unmount data partition (or partition 2) of SD card from your development machine]

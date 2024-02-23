@@ -28,6 +28,8 @@
 #include <vmm_resource.h>
 #include <vmm_devtree.h>
 #include <vmm_devdrv.h>
+#include <vmm_timer.h>
+#include <vmm_heap.h>
 #include <vmm_host_irq.h>
 #include <vmm_host_irqext.h>
 #include <vmm_host_ram.h>
@@ -41,6 +43,7 @@
 #include <libs/stringlib.h>
 #include <libs/mathlib.h>
 #include <arch_board.h>
+#include <arch_cpu_aspace.h>
 #include <arch_cpu.h>
 
 #define MODULE_DESC			"Command host"
@@ -56,17 +59,18 @@ static void cmd_host_usage(struct vmm_chardev *cdev)
 	vmm_cprintf(cdev, "   host help\n");
 	vmm_cprintf(cdev, "   host info\n");
 	vmm_cprintf(cdev, "   host cpu info\n");
+	vmm_cprintf(cdev, "   host cpu poke [<hcpu>]\n");
 	vmm_cprintf(cdev, "   host cpu stats\n");
 	vmm_cprintf(cdev, "   host irq stats\n");
 	vmm_cprintf(cdev, "   host irq set_affinity <hirq> <hcpu>\n");
 	vmm_cprintf(cdev, "   host extirq stats\n");
+	vmm_cprintf(cdev, "   host aspace info\n");
 	vmm_cprintf(cdev, "   host ram info\n");
 	vmm_cprintf(cdev, "   host ram bitmap [<column count>]\n");
 	vmm_cprintf(cdev, "   host ram reserve <physaddr> <size>\n");
 	vmm_cprintf(cdev, "   host vapool info\n");
 	vmm_cprintf(cdev, "   host vapool state\n");
 	vmm_cprintf(cdev, "   host vapool bitmap [<column count>]\n");
-	vmm_cprintf(cdev, "   host memmap info\n");
 	vmm_cprintf(cdev, "   host pagepool info\n");
 	vmm_cprintf(cdev, "   host pagepool state\n");
 	vmm_cprintf(cdev, "   host resources\n");
@@ -104,8 +108,8 @@ static int cmd_host_info(struct vmm_chardev *cdev)
 	vmm_cprintf(cdev, "%-25s: 0x%lx\n", "Boot CPU Hardware ID", hwid);
 	vmm_cprintf(cdev, "%-25s: %u\n", "Total Online CPUs",
 		    vmm_num_online_cpus());
-	vmm_cprintf(cdev, "%-25s: %u MB\n", "Total VAPOOL",
-		    CONFIG_VAPOOL_SIZE_MB);
+	vmm_cprintf(cdev, "%-25s: %lu MB\n", "Total VAPOOL",
+		    vmm_host_vapool_size() / (1024UL * 1024UL));
 	vmm_cprintf(cdev, "%-25s: %lu MB\n", "Total RAM",
 		    ((total *VMM_PAGE_SIZE) >> 20));
 
@@ -146,6 +150,50 @@ static int cmd_host_cpu_info(struct vmm_chardev *cdev)
 		arch_cpu_print(cdev, c);
 
 		vmm_cprintf(cdev, "\n");
+	}
+
+	return VMM_OK;
+}
+
+static void host_cpu_poke_func(void *arg0, void *arg1, void *arg2)
+{
+	*((bool *)arg0) = TRUE;
+}
+
+static int cmd_host_cpu_poke(struct vmm_chardev *cdev,
+			     const struct vmm_cpumask *cmask)
+{
+	u32 c;
+	u64 tstamp;
+	bool *poke;
+	bool free_poke = TRUE;
+
+	poke = vmm_zalloc(sizeof(*poke));
+	if (!poke) {
+		return VMM_ENOMEM;
+	}
+
+	for_each_cpu(c, cmask) {
+		vmm_cprintf(cdev, "CPU%d: Poke using async IPI ... ", c);
+
+		*poke = FALSE;
+		tstamp = vmm_timer_timestamp() + 1000000000ULL;
+		vmm_smp_ipi_async_call(vmm_cpumask_of(c), host_cpu_poke_func,
+					poke, NULL, NULL);
+		while (!(*poke)) {
+			if (tstamp < vmm_timer_timestamp()) {
+				free_poke = FALSE;
+				break;
+			}
+
+			vmm_scheduler_yield();
+		}
+
+		vmm_cprintf(cdev, "%s\n", (*poke) ? "Done" : "Timeout");
+	}
+
+	if (free_poke) {
+		vmm_free(poke);
 	}
 
 	return VMM_OK;
@@ -217,15 +265,17 @@ static void irq_stats_print(struct vmm_chardev *cdev, u32 irqno)
 
 	irq = vmm_host_irq_get(irqno);
 	irq_name = vmm_host_irq_get_name(irq);
-	if (vmm_host_irq_is_disabled(irq) || !irq_name) {
+	if (!irq || !irq_name ||
+	    vmm_host_irq_is_disabled(irq) ||
+	    vmm_host_irq_is_chained(irq)) {
 		return;
 	}
 	chip = vmm_host_irq_get_chip(irq);
 	if (!chip || !chip->name) {
 		return;
 	}
-	vmm_cprintf(cdev, " %-5d %-20s %-13s",
-		    irqno, irq_name, chip->name);
+	vmm_cprintf(cdev, " %-7d %-7d %-20s %-16s",
+		    irqno, irq->hwirq, irq_name, chip->name);
 	for_each_online_cpu(cpu) {
 		stats = vmm_host_irq_get_count(irq, cpu);
 		vmm_cprintf(cdev, " %-10d", stats);
@@ -237,20 +287,22 @@ static void cmd_host_irq_stats(struct vmm_chardev *cdev)
 {
 	u32 num, cpu, irq_count, irqext_count;
 
-	vmm_cprintf(cdev, "----------------------------------------");
+	vmm_cprintf(cdev,
+		    "------------------------------------------------------");
 	for_each_online_cpu(cpu) {
-		vmm_cprintf(cdev, "------------");
+		vmm_cprintf(cdev, "-----------");
 	}
 	vmm_cprintf(cdev, "\n");
-	vmm_cprintf(cdev, " %-5s %-20s %-13s",
-			  "IRQ#", "Name", "Chip");
+	vmm_cprintf(cdev, " %-7s %-7s %-20s %-16s",
+			  "IRQ#", "HWIRQ#", "Name", "Chip");
 	for_each_online_cpu(cpu) {
 		vmm_cprintf(cdev, " CPU%-7d", cpu);
 	}
 	vmm_cprintf(cdev, "\n");
-	vmm_cprintf(cdev, "----------------------------------------");
+	vmm_cprintf(cdev,
+		    "------------------------------------------------------");
 	for_each_online_cpu(cpu) {
-		vmm_cprintf(cdev, "------------");
+		vmm_cprintf(cdev, "-----------");
 	}
 	vmm_cprintf(cdev, "\n");
 
@@ -263,9 +315,10 @@ static void cmd_host_irq_stats(struct vmm_chardev *cdev)
 		irq_stats_print(cdev, num);
 	}
 
-	vmm_cprintf(cdev, "----------------------------------------");
+	vmm_cprintf(cdev,
+		    "------------------------------------------------------");
 	for_each_online_cpu(cpu) {
-		vmm_cprintf(cdev, "------------");
+		vmm_cprintf(cdev, "-----------");
 	}
 	vmm_cprintf(cdev, "\n");
 }
@@ -288,6 +341,18 @@ static int cmd_host_irq_set_affinity(struct vmm_chardev *cdev, u32 hirq, u32 hcp
 static void cmd_host_extirq_stats(struct vmm_chardev *cdev)
 {
 	vmm_host_irqext_debug_dump(cdev);
+}
+
+static void cmd_host_aspace_info(struct vmm_chardev *cdev)
+{
+	u32 free = vmm_host_memmap_hash_free_count();
+	u32 total = vmm_host_memmap_hash_total_count();
+
+	vmm_cprintf(cdev, "Memmap Free Entry   : %u (0x%08x)\n", free, free);
+	vmm_cprintf(cdev, "Memmap Total Entry  : %u (0x%08x)\n", total, total);
+	vmm_cprintf(cdev, "\n");
+
+	arch_cpu_aspace_print_info(cdev);
 }
 
 static void cmd_host_ram_info(struct vmm_chardev *cdev)
@@ -400,15 +465,6 @@ static void cmd_host_vapool_bitmap(struct vmm_chardev *cdev, int colcnt)
 		}
 	}
 	vmm_cprintf(cdev, "\n");
-}
-
-static void cmd_host_memmap_info(struct vmm_chardev *cdev)
-{
-	u32 free = vmm_host_memmap_hash_free_count();
-	u32 total = vmm_host_memmap_hash_total_count();
-
-	vmm_cprintf(cdev, "Free Entry   : %u (0x%08x)\n", free, free);
-	vmm_cprintf(cdev, "Total Entry  : %u (0x%08x)\n", total, total);
 }
 
 static int cmd_host_pagepool_info(struct vmm_chardev *cdev)
@@ -654,8 +710,8 @@ static int cmd_host_class_device_list(struct vmm_chardev *cdev,
 
 static int cmd_host_exec(struct vmm_chardev *cdev, int argc, char **argv)
 {
+	const struct vmm_cpumask *cmask;
 	int hirq, hcpu, colcnt, size;
-
 	physical_addr_t physaddr;
 
 	if (argc <= 1) {
@@ -670,6 +726,14 @@ static int cmd_host_exec(struct vmm_chardev *cdev, int argc, char **argv)
 	} else if ((strcmp(argv[1], "cpu") == 0) && (2 < argc)) {
 		if (strcmp(argv[2], "info") == 0) {
 			return cmd_host_cpu_info(cdev);
+		} else if (strcmp(argv[2], "poke") == 0) {
+			hcpu = (3 < argc) ? atoi(argv[3]) : -1;
+			if (hcpu >= 0 && vmm_cpu_online(hcpu)) {
+				cmask = vmm_cpumask_of(hcpu);
+			} else {
+				cmask = cpu_online_mask;
+			}
+			return cmd_host_cpu_poke(cdev, cmask);
 		} else if (strcmp(argv[2], "stats") == 0) {
 			return cmd_host_cpu_stats(cdev);
 		}
@@ -685,6 +749,11 @@ static int cmd_host_exec(struct vmm_chardev *cdev, int argc, char **argv)
 	} else if ((strcmp(argv[1], "extirq") == 0) && (2 < argc)) {
 		if (strcmp(argv[2], "stats") == 0) {
 			cmd_host_extirq_stats(cdev);
+			return VMM_OK;
+		}
+	} else if ((strcmp(argv[1], "aspace") == 0) && (2 < argc)) {
+		if (strcmp(argv[2], "info") == 0) {
+			cmd_host_aspace_info(cdev);
 			return VMM_OK;
 		}
 	} else if ((strcmp(argv[1], "ram") == 0) && (2 < argc)) {
@@ -717,11 +786,6 @@ static int cmd_host_exec(struct vmm_chardev *cdev, int argc, char **argv)
 				colcnt = 64;
 			}
 			cmd_host_vapool_bitmap(cdev, colcnt);
-			return VMM_OK;
-		}
-	} else if ((strcmp(argv[1], "memmap") == 0) && (2 < argc)) {
-		if (strcmp(argv[2], "info") == 0) {
-			cmd_host_memmap_info(cdev);
 			return VMM_OK;
 		}
 	} else if ((strcmp(argv[1], "pagepool") == 0) && (2 < argc)) {

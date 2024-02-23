@@ -162,7 +162,7 @@ struct tss_64 {
 	u32 resvd_3;
 	u32 resvd_4;
 	u32 map_base;
-} __packed;
+};
 
 union tss_desc_base_limit {
 	u32 val;
@@ -201,6 +201,13 @@ struct tss64_desc {
 	union tss_desc_base tb;
 	u32 reserved;
 } __packed;
+
+struct segment {
+	u16 selector;
+	u32 access_rights;
+	u32 limit;
+	u64 base;
+};
 
 /* Interrupt handlers. */
 extern void _exception_div_error(void);

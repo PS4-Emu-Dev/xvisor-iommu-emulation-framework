@@ -29,10 +29,12 @@
 ifeq ($(CONFIG_64BIT),y)
 arch-cflags-y += -mabi=lp64
 march-y = rv64im
+cpu-mergeflags += -melf64lriscv
 else
-arch-ldflags-y += -static-libgcc -lgcc
+arch-ldflags-y += -mabi=ilp32 -lgcc
 arch-cflags-y += -mabi=ilp32
 march-y = rv32im
+cpu-mergeflags += -melf32lriscv
 endif
 
 ifeq ($(CONFIG_RISCV_ISA_A),y)
@@ -52,14 +54,25 @@ ifeq ($(CONFIG_CMODEL_MEDANY),y)
 	arch-cflags-y += -mcmodel=medany
 endif
 
+# Check whether the assembler and the compiler support the Zicsr and Zifencei extensions
+have_zicsr_zifenci := $(shell $(CC) -nostdlib -march=$(march-y)$(arch-a-y)$(arch-c-y)_zicsr_zifencei -x c /dev/null -o /dev/null 2>&1 | grep "zicsr\|zifencei" > /dev/null && echo n || echo y)
+march-zicsr-zifenci-$(have_zicsr_zifenci) = _zicsr_zifencei
+
+march-nonld-isa-y = $(march-y)$(arch-a-y)fd$(arch-c-y)$(march-zicsr-zifenci-y)
+march-ld-isa-y = $(march-y)$(arch-a-y)$(arch-c-y)
+
 cpu-cppflags+=-DTEXT_START=0x10000000
-cpu-cflags += $(arch-cflags-y) -march=$(march-y)$(arch-a-y)$(arch-c-y)
+cpu-cflags += $(arch-cflags-y) -march=$(march-nonld-isa-y)
 cpu-cflags += -fno-strict-aliasing -O2
-cpu-asflags += $(arch-cflags-y) -march=$(march-y)$(arch-a-y)fd$(arch-c-y)
-cpu-ldflags += $(arch-ldflags-y)
+cpu-asflags += $(arch-cflags-y) -march=$(march-nonld-isa-y)
+cpu-ldflags += $(arch-ldflags-y) -march=$(march-ld-isa-y)
+
+cpu-cflags += -fno-pie
+cpu-asflags += -fno-pie
+cpu-ldflags += -static
+cpu-mergeflags += -static
 
 cpu-objs-y+= cpu_entry.o
-cpu-objs-y+= cpu_entry_helper.o
 cpu-objs-y+= cpu_proc.o
 cpu-objs-y+= cpu_tlb.o
 cpu-objs-y+= cpu_sbi.o
@@ -73,11 +86,20 @@ cpu-objs-$(CONFIG_SMP)+= cpu_locks.o
 cpu-objs-y+= cpu_atomic.o
 cpu-objs-y+= cpu_atomic64.o
 cpu-objs-y+= cpu_exception.o
+cpu-objs-$(CONFIG_SMP)+=cpu_smp_ops.o
+cpu-objs-$(CONFIG_SMP)+=cpu_smp_ops_default.o
+cpu-objs-$(CONFIG_SMP)+=cpu_smp_ops_sbi.o
+cpu-objs-$(CONFIG_SMP)+=cpu_sbi_ipi.o
 cpu-objs-y+= cpu_vcpu_helper.o
-cpu-objs-y+= cpu_vcpu_csr.o
+cpu-objs-y+= cpu_vcpu_nested.o
 cpu-objs-y+= cpu_vcpu_fp.o
 cpu-objs-y+= cpu_vcpu_irq.o
 cpu-objs-y+= cpu_vcpu_sbi.o
+cpu-objs-y+= cpu_vcpu_sbi_base.o
+cpu-objs-y+= cpu_vcpu_sbi_legacy.o
+cpu-objs-y+= cpu_vcpu_sbi_replace.o
+cpu-objs-y+= cpu_vcpu_sbi_hsm.o
+cpu-objs-y+= cpu_vcpu_sbi_xvisor.o
 cpu-objs-y+= cpu_vcpu_switch.o
 cpu-objs-y+= cpu_vcpu_timer.o
 cpu-objs-y+= cpu_vcpu_trap.o

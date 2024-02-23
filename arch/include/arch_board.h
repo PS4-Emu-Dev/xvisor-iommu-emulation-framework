@@ -23,15 +23,34 @@
 #ifndef _ARCH_BOARD_H__
 #define _ARCH_BOARD_H__
 
-#include <vmm_chardev.h>
+#include <vmm_types.h>
+
+struct vmm_chardev;
 
 /** Print board specific information */
 void arch_board_print_info(struct vmm_chardev *cdev);
 
-/** Board early init */
+/**
+ * Board nascent init
+ *
+ * Only Host aspace, Heap, and Device tree available.
+ */
+int arch_board_nascent_init(void);
+
+/**
+ * Board early init
+ *
+ * Only Host aspace, Heap, Device tree, Per-CPU areas, CPU hotplug,
+ * and Host IRQ available.
+ */
 int arch_board_early_init(void);
 
-/** Board final init */
+/**
+ * Board final init
+ *
+ * Almost all initialization (including builtin module) done. Only
+ * driver probing remains which has to be done by this function.
+ */
 int arch_board_final_init(void);
 
 #endif

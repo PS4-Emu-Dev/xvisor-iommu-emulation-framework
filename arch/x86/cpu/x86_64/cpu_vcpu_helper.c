@@ -35,31 +35,36 @@
 #include <libs/stringlib.h>
 #include <libs/bitops.h>
 #include <arch_guest_helper.h>
+#include <x86_debug_log.h>
+
+DEFINE_X86_DEBUG_LOG_SUBSYS_LEVEL(x86_vcpu, X86_DEBUG_LOG_LVL_INFO);
 
 void arch_vcpu_emergency_shutdown(struct vcpu_hw_context *context);
 
-static void init_cpu_capabilities(struct vmm_vcpu *vcpu)
+static void init_vcpu_capabilities(struct vmm_vcpu *vcpu)
 {
 	u32 funcs, b, c, d;
 	struct x86_vcpu_priv *priv = x86_vcpu_priv(vcpu);
 	struct cpuid_response *func_response;
 	extern struct cpuinfo_x86 cpu_info;
 
-	for (funcs = CPUID_BASE_VENDORSTRING;
+	for (funcs = CPUID_BASE_LFUNCSTD;
 	     funcs < CPUID_BASE_FUNC_LIMIT; funcs++) {
 		func_response =
 			(struct cpuid_response *)
 			&priv->standard_funcs[funcs];
 
 		switch (funcs) {
-		case CPUID_BASE_VENDORSTRING:
-			cpuid(CPUID_BASE_VENDORSTRING,
+		case CPUID_BASE_LFUNCSTD:
+			cpuid(CPUID_BASE_LFUNCSTD,
 			      &func_response->resp_eax,
 			      &func_response->resp_ebx,
 			      &func_response->resp_ecx,
 			      &func_response->resp_edx);
 
-			func_response->resp_eax = CPUID_BASE_FUNC_LIMIT;
+			/* TODO: CPUID 7 as more features. Limiting to 4 right now. */
+			func_response->resp_eax = CPUID_BASE_CACHE_CONF;
+			X86_DEBUG_LOG(x86_vcpu, LVL_INFO, "Guest base CPUID Limited to 0x%"PRIx32"\n", func_response->resp_eax);
 			break;
 
 		case CPUID_BASE_FEATURES:
@@ -74,25 +79,26 @@ static void init_cpu_capabilities(struct vmm_vcpu *vcpu)
 
 			/* No VMX or x2APIC */
 			if (cpu_info.vendor == x86_VENDOR_INTEL) {
-				clear_bit(CPUID_FEAT_ECX_x2APIC_BIT, (volatile unsigned long *)&c);
-				clear_bit(CPUID_FEAT_ECX_VMX_BIT, (volatile unsigned long *)&c);
+				clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, ECX, X2APIC), (volatile unsigned long *)&c);
+				clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, ECX, VMX), (volatile unsigned long *)&c);
 			}
-			clear_bit(CPUID_FEAT_ECX_MONITOR_BIT, (volatile unsigned long *)&c);
+			clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, ECX, MONITOR), (volatile unsigned long *)&c);
 			func_response->resp_ecx = c;
 
 			/* No PAE, MTRR, PGE, ACPI, PSE & MSR */
-			clear_bit(CPUID_FEAT_EDX_PAE_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_MTRR_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_PGE_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_ACPI_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_HTT_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_PSE_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_MSR_BIT, (volatile unsigned long *)&d);
+			clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, EDX, PAE), (volatile unsigned long *)&d);
+			clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, EDX, MTRR), (volatile unsigned long *)&d);
+			clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, EDX, PGE), (volatile unsigned long *)&d);
+			clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, EDX, ACPI), (volatile unsigned long *)&d);
+			clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, EDX, HTT), (volatile unsigned long *)&d);
+			clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, EDX, PSE), (volatile unsigned long *)&d);
+			clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, EDX, MSR), (volatile unsigned long *)&d);
 
 			func_response->resp_edx = d;
 			break;
 
 		default:
+			X86_DEBUG_LOG(x86_vcpu, LVL_INFO, "CPUID: 0x%"PRIx32" defaulting to CPU reported values\n", funcs);
 			func_response->resp_eax = 0;
 			func_response->resp_ebx = 0;
 			func_response->resp_ecx = 0;
@@ -101,100 +107,60 @@ static void init_cpu_capabilities(struct vmm_vcpu *vcpu)
 		}
 	}
 
-	for (funcs = CPUID_EXTENDED_BASE;
-	     funcs < CPUID_EXTENDED_FUNC_LIMIT; funcs++) {
-		func_response =
-			(struct cpuid_response *)
-			&priv->extended_funcs[funcs - CPUID_EXTENDED_BASE];
+	for (funcs = CPUID_EXTENDED_LFUNCEXTD; funcs < CPUID_EXTENDED_FUNC_LIMIT; funcs++) {
+		func_response = (struct cpuid_response *)&priv->extended_funcs[funcs - CPUID_EXTENDED_LFUNCEXTD];
 
-		switch (funcs) {
-		case CPUID_EXTENDED_BASE:
-			cpuid(CPUID_EXTENDED_FEATURES,
-			      &func_response->resp_eax,
-			      &func_response->resp_ebx,
-			      &func_response->resp_ecx,
+		switch(funcs) {
+		case CPUID_EXTENDED_LFUNCEXTD:
+			cpuid(CPUID_EXTENDED_FEATURES, &func_response->resp_eax,
+			      &func_response->resp_ebx, &func_response->resp_ecx,
 			      &func_response->resp_edx);
 
-			func_response->resp_eax =
-				CPUID_EXTENDED_L2_CACHE_TLB_IDENTIFIER
-				- CPUID_EXTENDED_BASE;
+			func_response->resp_eax = CPUID_EXTENDED_ADDR_BITS;
+			X86_DEBUG_LOG(x86_vcpu, LVL_INFO, "Guest extended CPUID Limited to 0x%"PRIx32"\n", func_response->resp_eax);
 			break;
 
 		case CPUID_EXTENDED_FEATURES: /* replica of base features */
 			cpuid(CPUID_EXTENDED_FEATURES, &func_response->resp_eax,
 			      &b, &c, &d);
 
-			/* NR cpus and apic id */
-			clear_bits(16, 31, (volatile unsigned long *)&b);
-			b |= ((vcpu->subid << 24)
-			      | (vcpu->guest->vcpu_count << 16));
 			func_response->resp_ebx = b;
-
-			/* No VMX or x2APIC */
-			if (cpu_info.vendor == x86_VENDOR_INTEL) {
-				clear_bit(CPUID_FEAT_ECX_x2APIC_BIT, (volatile unsigned long *)&c);
-				clear_bit(CPUID_FEAT_ECX_VMX_BIT, (volatile unsigned long *)&c);
-			}
-			clear_bit(CPUID_FEAT_ECX_MONITOR_BIT, (volatile unsigned long *)&c);
 			func_response->resp_ecx = c;
-
-			/* No PAE, MTRR, PGE, ACPI, PSE & MSR */
-			clear_bit(CPUID_FEAT_EDX_PAE_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_MTRR_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_PGE_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_ACPI_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_HTT_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_PSE_BIT, (volatile unsigned long *)&d);
-			clear_bit(CPUID_FEAT_EDX_MSR_BIT, (volatile unsigned long *)&d);
-
+			clear_bit(CPUID_BASE_FEAT_BIT(FEATURES, EDX, NX), (volatile unsigned long *)&d);
 			func_response->resp_edx = d;
 			break;
-		}
-	}
 
-	switch(cpu_info.vendor) {
-	case x86_VENDOR_AMD:
-		for (funcs = CPUID_EXTENDED_BASE;
-		     funcs < CPUID_EXTENDED_FUNC_LIMIT; funcs++) {
-			switch(funcs) {
-			case AMD_CPUID_EXTENDED_L1_CACHE_TLB_IDENTIFIER:
+		case AMD_CPUID_EXTENDED_L1_CACHE_TLB_IDENTIFIER:
+			if (cpu_info.vendor == x86_VENDOR_AMD) {
 				cpuid(AMD_CPUID_EXTENDED_L1_CACHE_TLB_IDENTIFIER,
 				      &func_response->resp_eax,
 				      &func_response->resp_ebx,
 				      &func_response->resp_ecx,
 				      &func_response->resp_edx);
-				break;
-
-			case CPUID_EXTENDED_L2_CACHE_TLB_IDENTIFIER:
-				cpuid(CPUID_EXTENDED_L2_CACHE_TLB_IDENTIFIER,
-				      &func_response->resp_eax,
-				      &func_response->resp_ebx,
-				      &func_response->resp_ecx,
-				      &func_response->resp_edx);
-				break;
+			} else {
+				func_response->resp_eax = 0;
+				func_response->resp_ebx = 0;
+				func_response->resp_ecx = 0;
+				func_response->resp_edx = 0;
 			}
-		}
-		break;
+			break;
 
-	case x86_VENDOR_INTEL:
-		for (funcs = CPUID_BASE_VENDORSTRING;
-		     funcs < CPUID_BASE_FUNC_LIMIT; funcs++) {
-			func_response =
-				(struct cpuid_response *)
-				&priv->standard_funcs[funcs];
-
-			switch (funcs) {
-			}
+		default:
+			X86_DEBUG_LOG(x86_vcpu, LVL_INFO, "CPUID: 0x%"PRIx32" defaulting to CPU reported values\n", funcs);
+			cpuid(funcs, &func_response->resp_eax,
+			      &func_response->resp_ebx,
+			      &func_response->resp_ecx,
+			      &func_response->resp_edx);
+			break;
 		}
-		break;
 	}
 }
 
 static void arch_guest_vcpu_trampoline(struct vmm_vcpu *vcpu)
 {
-	VM_LOG(LVL_DEBUG, "Running VCPU %s\n", vcpu->name);
+	X86_DEBUG_LOG(x86_vcpu, LVL_DEBUG, "Running VCPU %s\n", vcpu->name);
 	cpu_boot_vcpu(x86_vcpu_priv(vcpu)->hw_context);
-	VM_LOG(LVL_ERR, "ERROR: Guest VCPU exited from run loop!\n");
+	X86_DEBUG_LOG(x86_vcpu, LVL_ERR, "ERROR: Guest VCPU exited from run loop!\n");
 	while(1); /* Should never come here! */
 }
 
@@ -221,10 +187,11 @@ int arch_vcpu_init(struct vmm_vcpu *vcpu)
 
 			INIT_SPIN_LOCK(&x86_vcpu_priv(vcpu)->lock);
 
-			init_cpu_capabilities(vcpu);
+			init_vcpu_capabilities(vcpu);
 
 			x86_vcpu_priv(vcpu)->hw_context = vmm_zalloc(sizeof(struct vcpu_hw_context));
 			x86_vcpu_priv(vcpu)->hw_context->assoc_vcpu = vcpu;
+			x86_vcpu_priv(vcpu)->hw_context->sign = 0xdeadbeef;
 
 			x86_vcpu_priv(vcpu)->hw_context->vcpu_emergency_shutdown = arch_vcpu_emergency_shutdown;
 			cpu_init_vcpu_hw_context(&cpu_info, x86_vcpu_priv(vcpu)->hw_context);
@@ -307,99 +274,13 @@ void arch_vcpu_stat_dump(struct vmm_chardev *cdev, struct vmm_vcpu *vcpu)
 
 static void dump_guest_vcpu_state(struct vcpu_hw_context *context)
 {
-	int i;
-	u32 val;
-
 	vmm_printf("\nGUEST %s dump state:\n\n", context->assoc_vcpu->name);
 
-	vmm_printf("RAX: 0x%"PRIx64" RBX: 0x%"PRIx64
-		   " RCX: 0x%"PRIx64" RDX: 0x%"PRIx64"\n",
-		   context->vmcb->rax, context->g_regs[GUEST_REGS_RBX],
-		   context->g_regs[GUEST_REGS_RCX], context->g_regs[GUEST_REGS_RDX]);
-	vmm_printf("R08: 0x%"PRIx64" R09: 0x%"PRIx64
-		   " R10: 0x%"PRIx64" R11: 0x%"PRIx64"\n",
-		   context->g_regs[GUEST_REGS_R8], context->g_regs[GUEST_REGS_R9],
-		   context->g_regs[GUEST_REGS_R10], context->g_regs[GUEST_REGS_R10]);
-	vmm_printf("R12: 0x%"PRIx64" R13: 0x%"PRIx64
-		   " R14: 0x%"PRIx64" R15: 0x%"PRIx64"\n",
-		   context->g_regs[GUEST_REGS_R12], context->g_regs[GUEST_REGS_R13],
-		   context->g_regs[GUEST_REGS_R14], context->g_regs[GUEST_REGS_R15]);
-	vmm_printf("RSP: 0x%"PRIx64" RBP: 0x%"PRIx64
-		   " RDI: 0x%"PRIx64" RSI: 0x%"PRIx64"\n",
-		   context->vmcb->rsp, context->g_regs[GUEST_REGS_RBP],
-		   context->g_regs[GUEST_REGS_RDI], context->g_regs[GUEST_REGS_RSI]);
-	vmm_printf("RIP: 0x%"PRIx64"\n\n", context->vmcb->rip);
-	vmm_printf("CR0: 0x%"PRIx64" CR2: 0x%"PRIx64
-		   " CR3: 0x%"PRIx64" CR4: 0x%"PRIx64"\n",
-		   context->vmcb->cr0, context->vmcb->cr2,
-		   context->vmcb->cr3, context->vmcb->cr4);
+	if (context->cpuinfo->vendor == x86_VENDOR_AMD)
+		svm_dump_guest_state(context);
+	else
+		vmcs_dump(context);
 
-	dump_seg_selector("CS ", &context->vmcb->cs);
-	dump_seg_selector("DS ", &context->vmcb->ds);
-	dump_seg_selector("ES ", &context->vmcb->es);
-	dump_seg_selector("SS ", &context->vmcb->ss);
-	dump_seg_selector("FS ", &context->vmcb->fs);
-	dump_seg_selector("GS ", &context->vmcb->gs);
-	dump_seg_selector("GDT", &context->vmcb->gdtr);
-	dump_seg_selector("LDT", &context->vmcb->ldtr);
-	dump_seg_selector("IDT", &context->vmcb->idtr);
-	dump_seg_selector("TR ", &context->vmcb->tr);
-
-
-	vmm_printf("RFLAGS: 0x%"PRIx64"    [ ", context->vmcb->rflags);
-	for (i = 0; i < 32; i++) {
-		val = context->vmcb->rflags & (0x1UL << i);
-		switch(val) {
-		case X86_EFLAGS_CF:
-			vmm_printf("CF ");
-			break;
-		case X86_EFLAGS_PF:
-			vmm_printf("PF ");
-			break;
-		case X86_EFLAGS_AF:
-			vmm_printf("AF ");
-			break;
-		case X86_EFLAGS_ZF:
-			vmm_printf("ZF ");
-			break;
-		case X86_EFLAGS_SF:
-			vmm_printf("SF ");
-			break;
-		case X86_EFLAGS_TF:
-			vmm_printf("TF ");
-			break;
-		case X86_EFLAGS_IF:
-			vmm_printf("IF ");
-			break;
-		case X86_EFLAGS_DF:
-			vmm_printf("DF ");
-			break;
-		case X86_EFLAGS_OF:
-			vmm_printf("OF ");
-			break;
-		case X86_EFLAGS_NT:
-			vmm_printf("NT ");
-			break;
-		case X86_EFLAGS_RF:
-			vmm_printf("RF ");
-			break;
-		case X86_EFLAGS_VM:
-			vmm_printf("VM ");
-			break;
-		case X86_EFLAGS_AC:
-			vmm_printf("AC ");
-			break;
-		case X86_EFLAGS_VIF:
-			vmm_printf("VIF ");
-			break;
-		case X86_EFLAGS_VIP:
-			vmm_printf("VIP ");
-			break;
-		case X86_EFLAGS_ID:
-			vmm_printf("ID ");
-			break;
-		}
-	}
 	vmm_printf("]\n");
 }
 

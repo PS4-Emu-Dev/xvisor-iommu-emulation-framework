@@ -24,6 +24,32 @@
 #include <riscv_asm.h>
 #include <riscv_csr.h>
 
+#define RISCV_IMAGE_MAGIC	"RISCV\0\0\0"
+#define RISCV_IMAGE_MAGIC2	"RSC\x05"
+
+#define RISCV_IMAGE_FLAG_BE_SHIFT	0
+#define RISCV_IMAGE_FLAG_BE_MASK	0x1
+
+#define RISCV_IMAGE_FLAG_LE		0
+#define RISCV_IMAGE_FLAG_BE		1
+
+#ifdef CONFIG_CPU_BIG_ENDIAN
+#error conversion of header fields to LE not yet implemented
+#else
+#define __HEAD_FLAG_BE			RISCV_IMAGE_FLAG_LE
+#endif
+
+#define __HEAD_FLAG(field)		(__HEAD_FLAG_##field << \
+					RISCV_IMAGE_FLAG_##field##_SHIFT)
+
+#define __HEAD_FLAGS			(__HEAD_FLAG(BE))
+
+#define RISCV_HEADER_VERSION_MAJOR	0
+#define RISCV_HEADER_VERSION_MINOR	2
+
+#define RISCV_HEADER_VERSION (RISCV_HEADER_VERSION_MAJOR << 16 | \
+			      RISCV_HEADER_VERSION_MINOR)
+
 	/*
 	 * _start: Primary CPU startup code
 	 * _start_secondary: Secondary CPU startup code
@@ -38,6 +64,36 @@
 	.globl _start_secondary
 	.globl _start_secondary_nopen
 _start:
+	/*
+	 * Image header expected by Linux boot-loaders. The image header data
+	 * structure is described in asm/image.h.
+	 * Do not modify it without modifying the structure and all bootloaders
+	 * that expects this header format!!
+	 */
+	/* jump to start kernel */
+	j _start_real
+	/* reserved */
+	.word 0
+	.balign 8
+#ifdef CONFIG_64BIT
+	/* Image load offset(2MB) from start of RAM */
+	.dword 0x200000
+#else
+	/* Image load offset(4MB) from start of RAM */
+	.dword 0x400000
+#endif
+	/* Effective size of kernel image */
+	.dword _code_end - _code_start
+	.dword __HEAD_FLAGS
+	.word RISCV_HEADER_VERSION
+	.word 0
+	.dword 0
+	.ascii RISCV_IMAGE_MAGIC
+	.balign 4
+	.ascii RISCV_IMAGE_MAGIC2
+	.word 0
+
+_start_real:
 	/* Mask all interrupts */
 	csrw CSR_SIE, zero
 
@@ -100,15 +156,6 @@ _bss_zero:
 	sub	a0, a0, a4
 	add	sp, a0, a2
 
-	/* Check and copy FDT */
-	la	a6, _bootcpu_reg1
-	REG_L	a0, (a6)
-	la	a6, __builtin_dtb
-	REG_L	a1, (a6)
-	sub	a1, a1, a4
-	add	a1, a1, a2
-	call	_copy_fdt
-
 	/* Setup initial page table */
 	la	a6, _load_start
 	REG_L	a0, (a6)
@@ -116,7 +163,7 @@ _bss_zero:
 	REG_L	a1, (a6)
 	la	a6, __exec_start
 	REG_L	a2, (a6)
-	la	a6, __exec_end
+	la	a6, _bootcpu_reg1
 	REG_L	a3, (a6)
 	call	_setup_initial_pgtbl
 
@@ -166,39 +213,44 @@ _start_secondary_wait:
 	 * Note: From this point primary CPU startup is same as secondary CPU
 	 */
 _start_secondary_nopen:
-	/* Set trap vector to spin forever to help debug */
-	la	a6, _start_hang
+	/* Set trap vector to appropriate place after enabling MMU */
+	la	a6, __exec_start
+	REG_L	a4, (a6)
+	la	a6, _load_start
+	REG_L	a2, (a6)
+	la	a6, _start_secondary_nopen_mmu_on
+	sub	a6, a6, a2
+	add	a6, a6, a4
 	csrw	CSR_STVEC, a6
 
 	/* Enable MMU */
-	la	a6, _load_start
-	REG_L	a2, (a6)
-	la	a6, __exec_start
-	REG_L	a4, (a6)
-	la	a6, __pgtbl_root
-	REG_L	a0, (a6)
-	sub	a0, a0, a4
-	add	a0, a0, a2
+	la	a0, stage1_pgtbl_root
 	srl	a0, a0, 12 /* Shift right by page size */
-	li	a1, SATP_MODE
+	la	a1, riscv_stage1_mode
+	REG_L	a1, (a1)
+	sll	a1, a1, SATP_MODE_SHIFT
 	or	a0, a0, a1
 	sfence.vma
 	csrw	CSR_SATP, a0
+
+	/* We should not reach here so just spin forever */
+	j	_start_hang
+
+	/* MMU is ON !!! */
+	.align 2
+_start_secondary_nopen_mmu_on:
 
 	/* Jump to final execution address */
 	la	a6, __cpu_init
 	REG_L	a0, (a6)
 	jalr	a0
 
+	.align 2
 _start_hang:
 	wfi
 	j	_start_hang
 
 	.align 3
-__pgtbl_root:
-	RISCV_PTR def_pgtbl
-__builtin_dtb:
-	RISCV_PTR dt_blob_start
 __exec_start:
 	RISCV_PTR _code_start
 __exec_end:
@@ -293,22 +345,19 @@ _cpu_init:
 	/* Swap TP and SSCRATCH */
 	csrrw	tp, CSR_SSCRATCH, tp
 
-	/* Save S0 in scratch space */
-	REG_S	s0, RISCV_SCRATCH_TMP0_OFFSET(tp)
-
-	/* Save SP in S0 */
-	add	s0, sp, zero
+	/* Save original SP in scratch space */
+	REG_S	sp, RISCV_SCRATCH_TMP0_OFFSET(tp)
 
 	/* Setup exception stack */
 	REG_L	sp, RISCV_SCRATCH_EXCE_STACK_OFFSET(tp)
 	addi	sp, sp, -(RISCV_ARCH_REGS_SIZE)
 
-	/* Save original SP (in S0) */
-	REG_S	s0, RISCV_ARCH_REGS_OFFSET(sp)(sp)
-
-	/* Save original S0 */
-	REG_L	s0, RISCV_SCRATCH_TMP0_OFFSET(tp)
+	/* Save S0 */
 	REG_S	s0, RISCV_ARCH_REGS_OFFSET(s0)(sp)
+
+	/* Save original SP from scratch space */
+	REG_L	s0, RISCV_SCRATCH_TMP0_OFFSET(tp)
+	REG_S	s0, RISCV_ARCH_REGS_OFFSET(sp)(sp)
 
 	/* Swap TP and SSCRATCH */
 	csrrw	tp, CSR_SSCRATCH, tp

@@ -3,26 +3,12 @@
 
 #include <multiboot.h>
 #include <vm/vmcb.h>
+#include <vm/vmx.h>
 #include <processor_flags.h>
 #include <cpu_features.h>
 #include <vmm_types.h>
 #include <cpu_pgtbl_helper.h>
 #include <libs/bitmap.h>
-
-enum {
-	VM_LOG_LVL_ERR,
-	VM_LOG_LVL_INFO,
-	VM_LOG_LVL_DEBUG,
-	VM_LOG_LVL_VERBOSE
-};
-extern int vm_default_log_lvl;
-#define VM_LOG(lvl, fmt, args...)					\
-	do {								\
-		if (VM_LOG_##lvl <= vm_default_log_lvl) {		\
-			vmm_printf("(%s:%d) " fmt, __func__,		\
-				   __LINE__, ##args);			\
-		}							\
-	}while(0);
 
 #define MOV_CRn_INST_SZ		3
 
@@ -103,6 +89,8 @@ struct vcpu_intercept_table {
 };
 
 struct vcpu_hw_context {
+	u32 instruction_error; /* !!NOTE!!: This has to be first variable */
+	u32 sign; /* 8-byte align */
 	struct cpuinfo_x86 *cpuinfo;
 	struct vmcb *vmcb;
 	struct vmcs *vmcs;
@@ -115,6 +103,8 @@ struct vcpu_hw_context {
 	u64 g_cr4;
 	u64 g_efer;
 	u64 g_cr8;
+	u64 g_rip;
+	u64 vmx_last_exit_qualification;
 
 	unsigned int asid;
 	u64 eptp;
@@ -171,8 +161,10 @@ struct cpuid_response {
 struct x86_vcpu_priv {
 	vmm_spinlock_t lock;
 	u64 capabilities;
-	struct cpuid_response extended_funcs[CPUID_EXTENDED_FUNC_LIMIT-CPUID_EXTENDED_BASE];
+	struct cpuid_response extended_funcs[CPUID_EXTENDED_FUNC_LIMIT-CPUID_EXTENDED_LFUNCEXTD];
 	struct cpuid_response standard_funcs[CPUID_BASE_FUNC_LIMIT];
+	u32 max_base_cpuid;
+	u32 max_extended_cpuid;
 	struct vcpu_hw_context *hw_context;
 	int int_pending; /* vector to be taken in guest */
 };

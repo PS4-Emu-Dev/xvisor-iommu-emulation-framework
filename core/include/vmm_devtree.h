@@ -87,6 +87,7 @@
 
 #define VMM_DEVTREE_CPUS_NODE_NAME		"cpus"
 #define VMM_DEVTREE_INTERRUPTS_ATTR_NAME	"interrupts"
+#define VMM_DEVTREE_INTERRUPT_CNTRL_ATTR_NAME	"interrupt-controller"
 #define VMM_DEVTREE_ENABLE_METHOD_ATTR_NAME	"enable-method"
 #define VMM_DEVTREE_CPU_CLEAR_ADDR_ATTR_NAME	"cpu-clear-addr"
 #define VMM_DEVTREE_CPU_RELEASE_ADDR_ATTR_NAME	"cpu-release-addr"
@@ -680,6 +681,15 @@ struct vmm_devtree_node *vmm_devtree_irq_find_parent(
  */
 int vmm_devtree_irq_parse_one(struct vmm_devtree_node *device, int index,
 			      struct vmm_devtree_phandle_args *out_irq);
+
+/**
+ * Find host irqdomain for a device node
+ * @dev: Device node of the device whose interrupt is to be mapped
+ *
+ * Returns a pointer to the host irqdomain , or NULL if not found.
+ */
+struct vmm_host_irqdomain *vmm_devtree_irqdomain_find(
+					struct vmm_devtree_node *dev);
 
 /**
  * Parse and map an interrupt into Xvisor space

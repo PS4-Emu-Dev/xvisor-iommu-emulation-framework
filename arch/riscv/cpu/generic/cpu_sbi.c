@@ -24,9 +24,11 @@
 #include <vmm_error.h>
 #include <vmm_compiler.h>
 #include <vmm_cpumask.h>
+#include <vmm_host_aspace.h>
 #include <vmm_smp.h>
 #include <vmm_stdio.h>
-
+#include <vmm_main.h>
+#include <generic_defterm.h>
 #include <cpu_sbi.h>
 #include <riscv_sbi.h>
 
@@ -69,7 +71,7 @@ int sbi_err_map_xvisor_errno(int err)
 	case SBI_ERR_INVALID_ADDRESS:
 		return VMM_EFAULT;
 	case SBI_ERR_NOT_SUPPORTED:
-	case SBI_ERR_FAILURE:
+	case SBI_ERR_FAILED:
 	default:
 		return VMM_ENOTSUPP;
 	};
@@ -97,23 +99,52 @@ void sbi_cpumask_to_hartmask(const struct vmm_cpumask *cmask,
 	}
 }
 
+static bool sbi_dbcn_avail;
+static u8 sbi_dbcn_read_char;
+static physical_addr_t sbi_dbcn_read_pa;
+
 void sbi_console_putchar(int ch)
 {
-	sbi_ecall(SBI_EXT_0_1_CONSOLE_PUTCHAR, 0, ch, 0, 0, 0, 0, 0);
+	if (!sbi_dbcn_avail) {
+		sbi_ecall(SBI_EXT_0_1_CONSOLE_PUTCHAR, 0, ch, 0, 0, 0, 0, 0);
+		return;
+	}
+
+	sbi_ecall(SBI_EXT_DBCN, SBI_EXT_DBCN_CONSOLE_WRITE_BYTE, ch,
+		  0, 0, 0, 0, 0);
 }
 
 int sbi_console_getchar(void)
 {
 	struct sbiret ret;
 
-	ret = sbi_ecall(SBI_EXT_0_1_CONSOLE_GETCHAR, 0, 0, 0, 0, 0, 0, 0);
+	if (!sbi_dbcn_avail) {
+		ret = sbi_ecall(SBI_EXT_0_1_CONSOLE_GETCHAR,
+				0, 0, 0, 0, 0, 0, 0);
+		return ret.error;
+	}
 
-	return ret.error;
+	sbi_dbcn_read_char = 0;
+	ret = sbi_ecall(SBI_EXT_DBCN, SBI_EXT_DBCN_CONSOLE_READ, 1,
+#ifdef CONFIG_64BIT
+			sbi_dbcn_read_pa, 0,
+#else
+			(u64)sbi_dbcn_read_pa, ((u64)sbi_dbcn_read_pa) >> 32,
+#endif
+			0, 0, 0);
+	if (ret.error)
+		return sbi_err_map_xvisor_errno(ret.error);
+	if (!ret.value)
+		return VMM_ENOENT;
+
+	return sbi_dbcn_read_char;
 }
 
-void sbi_shutdown(void)
+int sbi_shutdown(void)
 {
 	sbi_ecall(SBI_EXT_0_1_SHUTDOWN, 0, 0, 0, 0, 0, 0, 0);
+
+	return 0;
 }
 
 void sbi_clear_ipi(void)
@@ -180,30 +211,39 @@ static void __sbi_set_timer_v02(u64 stime_value)
 #endif
 }
 
-static int __sbi_send_ipi_v02(const unsigned long *hart_mask)
+static int __sbi_send_ipi_v02_real(unsigned long hmask, unsigned long hbase)
 {
-	struct vmm_cpumask tmask;
-	unsigned long hart, hmask, hbase;
 	struct sbiret ret = {0};
 	int result;
 
+	ret = sbi_ecall(SBI_EXT_IPI, SBI_EXT_IPI_SEND_IPI,
+			hmask, hbase, 0, 0, 0, 0);
+	if (ret.error) {
+		result = sbi_err_map_xvisor_errno(ret.error);
+		vmm_printf("%s: hmask=0x%lx hbase=%lu failed "
+			   "(error %d)\n", __func__, hmask,
+			   hbase, result);
+		return result;
+	}
+
+	return 0;
+}
+
+static int __sbi_send_ipi_v02(const unsigned long *hart_mask)
+{
+	unsigned long hart, hmask, hbase;
+	int result;
+
 	if (!hart_mask) {
-		sbi_cpumask_to_hartmask(cpu_online_mask, &tmask);
-		hart_mask = vmm_cpumask_bits(&tmask);
+		return __sbi_send_ipi_v02_real(0UL, -1UL);
 	}
 
 	hmask = hbase = 0;
 	for_each_set_bit(hart, hart_mask, CONFIG_CPU_COUNT) {
 		if (hmask && ((hbase + BITS_PER_LONG) <= hart)) {
-			ret = sbi_ecall(SBI_EXT_IPI, SBI_EXT_IPI_SEND_IPI,
-					hmask, hbase, 0, 0, 0, 0);
-			if (ret.error) {
-				result = sbi_err_map_xvisor_errno(ret.error);
-				vmm_printf("%s: hmask=0x%lx hbase=%lu failed "
-					   "(error %d)\n", __func__, hmask,
-					   hbase, result);
+			result = __sbi_send_ipi_v02_real(hmask, hbase);
+			if (result)
 				return result;
-			}
 			hmask = hbase = 0;
 		}
 		if (!hmask) {
@@ -212,15 +252,9 @@ static int __sbi_send_ipi_v02(const unsigned long *hart_mask)
 		hmask |= 1UL << (hart - hbase);
 	}
 	if (hmask) {
-		ret = sbi_ecall(SBI_EXT_IPI, SBI_EXT_IPI_SEND_IPI,
-				hmask, hbase, 0, 0, 0, 0);
-		if (ret.error) {
-			result = sbi_err_map_xvisor_errno(ret.error);
-			vmm_printf("%s: hmask=0x%lx hbase=%lu failed "
-				   "(error %d)\n", __func__, hmask,
-				   hbase, result);
+		result = __sbi_send_ipi_v02_real(hmask, hbase);
+		if (result)
 			return result;
-		}
 	}
 
 	return 0;
@@ -284,13 +318,12 @@ static int __sbi_rfence_v02(unsigned long fid,
 			    unsigned long start, unsigned long size,
 			    unsigned long arg4, unsigned long arg5)
 {
-	struct vmm_cpumask tmask;
 	unsigned long hart, hmask, hbase;
 	int result;
 
 	if (!hart_mask) {
-		sbi_cpumask_to_hartmask(cpu_online_mask, &tmask);
-		hart_mask = vmm_cpumask_bits(&tmask);
+		return __sbi_rfence_v02_real(fid, -1UL, 0UL,
+					     start, size, arg4);
 	}
 
 	hmask = hbase = 0;
@@ -445,6 +478,60 @@ unsigned long sbi_minor_version(void)
 	return sbi_spec_version & SBI_SPEC_VERSION_MINOR_MASK;
 }
 
+static int sbi_defterm_putc(u8 ch)
+{
+	sbi_console_putchar(ch);
+	return VMM_OK;
+}
+
+static int sbi_defterm_getc(u8 *ch)
+{
+	int rch = sbi_console_getchar();
+
+	if (rch < 0) {
+		return VMM_EIO;
+	}
+	*ch = rch;
+
+	return VMM_OK;
+}
+
+static int sbi_defterm_init(struct vmm_devtree_node *node)
+{
+	return vmm_host_va2pa((virtual_addr_t)&sbi_dbcn_read_char,
+			      &sbi_dbcn_read_pa);
+}
+
+static struct defterm_ops sbi_defterm_ops = {
+	.putc = sbi_defterm_putc,
+	.getc = sbi_defterm_getc,
+	.init = sbi_defterm_init,
+};
+
+static void __sbi_srst_reset(unsigned long type, unsigned long reason)
+{
+	sbi_ecall(SBI_EXT_SRST, SBI_EXT_SRST_RESET, type, reason,
+		  0, 0, 0, 0);
+	vmm_printf("%s: type=0x%lx reason=0x%lx failed\n",
+		   __func__, type, reason);
+}
+
+static int sbi_srst_shutdown(void)
+{
+	__sbi_srst_reset(SBI_SRST_RESET_TYPE_SHUTDOWN,
+			 SBI_SRST_RESET_REASON_NONE);
+
+	return 0;
+}
+
+static int sbi_srst_reset(void)
+{
+	__sbi_srst_reset(SBI_SRST_RESET_TYPE_COLD_REBOOT,
+			 SBI_SRST_RESET_REASON_NONE);
+
+	return 0;
+}
+
 int __init sbi_init(void)
 {
 	int ret;
@@ -461,21 +548,35 @@ int __init sbi_init(void)
 			sbi_get_firmware_id(), sbi_get_firmware_version());
 		if (sbi_probe_extension(SBI_EXT_TIME) > 0) {
 			__sbi_set_timer = __sbi_set_timer_v02;
-			vmm_init_printf("SBI v0.2 TIME extension detected\n");
+			vmm_init_printf("SBI TIME extension detected\n");
 		}
 		if (sbi_probe_extension(SBI_EXT_IPI) > 0) {
 			__sbi_send_ipi = __sbi_send_ipi_v02;
-			vmm_init_printf("SBI v0.2 IPI extension detected\n");
+			vmm_init_printf("SBI IPI extension detected\n");
 		}
 		if (sbi_probe_extension(SBI_EXT_RFENCE) > 0) {
 			__sbi_rfence = __sbi_rfence_v02;
-			vmm_init_printf("SBI v0.2 RFENCE extension detected\n");
+			vmm_init_printf("SBI RFENCE extension detected\n");
 		}
+		if (sbi_probe_extension(SBI_EXT_SRST) > 0) {
+			vmm_register_system_shutdown(sbi_srst_shutdown);
+			vmm_register_system_reset(sbi_srst_reset);
+			vmm_init_printf("SBI SRST extension detected\n");
+		}
+		if (sbi_spec_version == SBI_SPEC_MK_VERSION(2, 0) &&
+		    sbi_probe_extension(SBI_EXT_DBCN) > 0) {
+			sbi_dbcn_avail = TRUE;
+			vmm_init_printf("SBI DBCN extension detected\n");
+		}
+	} else {
+		vmm_register_system_shutdown(sbi_shutdown);
 	}
 
 	if (!sbi_has_0_2_rfence()) {
-		vmm_init_printf("WARNING: SBI v0.2 RFENCE not available !\n");
+		vmm_init_printf("WARNING: SBI RFENCE not available !\n");
 	}
+
+	defterm_set_initial_ops(&sbi_defterm_ops);
 
 	return 0;
 }

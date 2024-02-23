@@ -105,4 +105,32 @@ static inline __always_inline void clear_in_cr4 (unsigned long mask)
 	write_cr4(read_cr4() & ~mask);
 }
 
+static inline unsigned long read_msr(unsigned int msr)
+{
+	u32 low, high;
+
+	asm volatile("rdmsr" : "=a" (low), "=d" (high) : "c" (msr));
+
+        return low | ((unsigned long)high << 32);
+}
+
+static inline void write_msr(unsigned int msr, unsigned long val)
+{
+	asm volatile("wrmsr"
+		: /* no output */
+		: "c" (msr), "a" (val), "d" (val >> 32)
+		: "memory");
+}
+
+static inline u32 read_rflags(void)
+{
+	u32 rflags;
+
+	asm volatile("pushf\n\t"
+		     "popq %%rax\n\t"
+	     :"=a"(rflags):: "memory");
+
+	return rflags;
+}
+
 #endif /* __CONTROL_REG_ACCESS_H */

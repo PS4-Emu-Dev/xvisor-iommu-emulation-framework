@@ -152,10 +152,10 @@ static inline s32 smod32(s32 value, s32 divisor)
 /* Unsigned integer round-up macros */
 #define DIV_ROUND_UP(n, d)	udiv64(((n) + (d) - 1), (d))
 #define DIV_ROUND_UP_ULL(ll, d) \
-	({ unsigned long long _t = (ll) + (d) - 1; udiv64(_t, d); _t; })
+	({ unsigned long long _t = (ll) + (d) - 1; _t = udiv64(_t, d); _t; })
 #define DIV_ROUND_CLOSEST(n, d)	udiv64(((n) + (d) / 2), (d))
 #define DIV_ROUND_CLOSEST_ULL(ll, d) \
-	({ unsigned long long _t = (ll) + (d) / 2; udiv64(_t, d); _t; })
+	({ unsigned long long _t = (ll) + (d) / 2; _t = udiv64(_t, d); _t; })
 
 /**
  * Rough approximation to sqrt
@@ -190,5 +190,12 @@ static inline u64 muldiv64(u64 a, u32 b, u32 c)
 	res.l.low = udiv64(((umod64(rh, c) << 32) + (rl & 0xffffffff)), c);
 	return res.ll;
 }
+
+/**
+ * Compute the Greatest Common Divisor of two numbers.
+ *
+ */
+
+unsigned long gcd(unsigned long a, unsigned long b);
 
 #endif /* __MATHLIB_H__ */

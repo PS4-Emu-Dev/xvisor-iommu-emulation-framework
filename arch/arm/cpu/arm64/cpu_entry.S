@@ -108,47 +108,6 @@ _bss_zero:
 	cmp	x1, x2
 	blt	_bss_zero
 
-	/* Determine if a valid external dtb is provided */
-	/* Get DTB address */
-	ldr     x3, __boot_reg0
-	sub     x3, x3, x6
-	add     x3, x3, x4
-	ldr     x2, [x3]
-
-	/* First check for 8B alignment */
-	tst	x2, #0x7
-	bne	align_4k_boundary
-
-	/* Now check for FDT_MAGIC */
-	ldr	w0, [x2]
-	ldr	x1, __fdt_magic
-	cmp	w0, w1
-	bne	align_4k_boundary
-
-	/* Now get the dtb total-size */
-	ldr	w0, [x2, #4]
-	rev	w0, w0		/* Byte-swap as FDt is in big-endian */
-
-	/* Compare with max supported dtb size */
-	ldr	x1, __max_dtb_size
-	cmp	x0, x1
-	bgt	align_4k_boundary
-
-	/* Overwrite the built-in fdt with the one passed */
-	ldr	x1, __builtin_dtb
-	sub	x1, x1, x6
-	add	x1, x1, x4
-
-	/* x0 = dtb total size */
-	/* x1 = builtin_dtb load-address */
-	/* x2 = passed dtb address */
-
-dtb_save_loop:
-	ldr	x3, [x2], #8
-	str	x3, [x1], #8
-	subs	x0, x0, #8
-	bgt	dtb_save_loop
-
 align_4k_boundary:
 	/* Relocate code if load start is not 4 KB aligned */
 	mov	x0, x4
@@ -219,7 +178,10 @@ _start_mmu_init:
 	mov	x0, x4
 	mov	x1, x5
 	mov	x2, x6
-	mov	x3, x7
+	ldr     x3, __boot_reg0
+	sub     x3, x3, x6
+	add     x3, x3, x4
+	ldr     x3, [x3]
 
 	bl	_setup_initial_ttbl
 
@@ -305,8 +267,8 @@ _start_secondary_nopen:
 	ldr	x0, __hcr_set
 	msr	hcr_el2, x0
 
-	/* Setup temporary vector containing branch to self for debug */
-	ldr	x0, __vbar_val
+	/* Setup init vector containing branch to self for debug */
+	ldr	x0, __init_vectors
 	msr    	vbar_el2, x0
 
 	/* Setup Hypervisor System Control Register */
@@ -315,21 +277,13 @@ _start_secondary_nopen:
 	dsb	sy
 	isb
 
-	ldr	x0, __cpu_init
-	blr	x0
-
+	/* We should never reach here */
 _start_hang:
 	b	.
 
-#define FDT_MAGIC	0xedfe0dd0	/* 0xd00dfeed in big-endian */
-
 	.align 3
-__fdt_magic:
-	.dword FDT_MAGIC
-__builtin_dtb:
-	.dword dt_blob_start
-__max_dtb_size:
-	.dword CONFIG_ARM_MAX_DTB_SIZE
+	.globl __mair_set
+	.globl __tcr_set
 __mair_set:
 	.dword (MAIR(0x00, AINDEX_DEVICE_nGnRnE) | \
 		MAIR(0x04, AINDEX_DEVICE_nGnRE) | \
@@ -376,11 +330,9 @@ __copy_end:
 __ttbr_set_addr:
 	.dword __ttbr_set
 __ttbr_set:
-	.dword def_ttbl
-__cpu_init:
-	.dword _cpu_init
-__vbar_val:
-	.dword vectors
+	.dword stage1_pgtbl_root
+__init_vectors:
+	.dword init_vectors
 __boot_reg0:
 	.dword _boot_reg0
 
@@ -471,12 +423,10 @@ _cpu_init:
 
 	bl	cpu_init
 
-
 .macro EXCEPTION_HANDLER irqname
 	.align 6
 \irqname:
 .endm
-
 
 /* Push registers on stack */
 .macro	PUSH_REGS
@@ -542,7 +492,6 @@ _cpu_init:
 	eret
 .endm
 
-
 /*
  * Exception vectors.
  */
@@ -550,6 +499,32 @@ _cpu_init:
 	.align	7
 	b	\label
 .endm
+
+	.align	11
+	.globl init_vectors
+init_vectors:
+	ventry	hyp_init_entry		/* Synchronous EL1t */
+	ventry	hyp_init_entry		/* IRQ EL1t */
+	ventry	hyp_init_entry		/* FIQ EL1t */
+	ventry	hyp_init_entry		/* Error EL1t */
+
+	ventry	hyp_init_entry		/* Synchronous EL1h */
+	ventry	hyp_init_entry		/* IRQ EL1h */
+	ventry	hyp_init_entry		/* FIQ EL1h */
+	ventry	hyp_init_entry		/* Error EL1h */
+
+	ventry	hyp_init_entry		/* Synchronous 64-bit EL0 */
+	ventry	hyp_init_entry		/* IRQ 64-bit EL0 */
+	ventry	hyp_init_entry		/* FIQ 64-bit EL0 */
+	ventry	hyp_init_entry		/* Error 64-bit EL0 */
+
+	ventry	hyp_init_entry		/* Synchronous 32-bit EL0 */
+	ventry	hyp_init_entry		/* IRQ 32-bit EL0 */
+	ventry	hyp_init_entry		/* FIQ 32-bit EL0 */
+	ventry	hyp_init_entry		/* Error 32-bit EL0 */
+
+EXCEPTION_HANDLER hyp_init_entry
+	b	_cpu_init
 
 	.align	11
 	.globl vectors;
@@ -573,7 +548,6 @@ vectors:
 	ventry	guest_irq_a32		/* IRQ 32-bit EL0 */
 	ventry	guest_fiq_a32		/* FIQ 32-bit EL0 */
 	ventry	guest_error_a32		/* Error 32-bit EL0 */
-
 
 EXCEPTION_HANDLER hyp_sync_invalid
 	PUSH_REGS

@@ -23,6 +23,7 @@
 
 #include <arch_types.h>
 #include <arch_board.h>
+#include <arch_sbi.h>
 #include <basic_stdio.h>
 #include <basic_heap.h>
 #include <basic_string.h>
@@ -72,12 +73,12 @@
 
 void arch_board_reset(void)
 {
-	/* Nothing to do */
+	sbi_reset();
 }
 
 void arch_board_init(void)
 {
-	/* Nothing to do */
+	sbi_init();
 }
 
 char *arch_board_name(void)
@@ -97,14 +98,14 @@ physical_size_t arch_board_ram_size(void)
 
 void arch_board_linux_default_cmdline(char *cmdline, u32 cmdline_sz)
 {
-	basic_strcpy(cmdline, "root=/dev/ram rw earlycon=sbi "
-			      "console=ttyS0,115200");
+	basic_strcpy(cmdline, "root=/dev/ram rw console=ttyS0,115200 "
+			      "earlycon=uart8250,mmio,0x10000000");
 }
 
 void arch_board_fdt_fixup(void *fdt_addr)
 {
-	char name[64];
 	u32 i, *vals;
+	char name[64], isa[256];
 	int ret, cpus_offset, cpu_offset, intc_offset, plic_offset;
 	u32 timebase_freq = (u32)vminfo_clocksource_freq(VIRT_VMINFO);
 	u32 vcpu_count = vminfo_vcpu_count(VIRT_VMINFO);
@@ -178,8 +179,9 @@ void arch_board_fdt_fixup(void *fdt_addr)
 			return;
 		}
 
+		sbi_xvisor_isa_string(isa, sizeof(isa));
 		ret = fdt_setprop_string(fdt_addr, cpu_offset,
-					 "riscv,isa", "rv64imacfd");
+					 "riscv,isa", isa);
 		if (ret < 0) {
 			basic_printf("Failed to set %s property of /cpus/%s "
 				     "DT node\n", "riscv,isa", name);

@@ -24,9 +24,41 @@
 #define _CPU_VCPU_SBI_H__
 
 #include <vmm_types.h>
-#include <vmm_manager.h>
+
+struct vmm_vcpu;
+struct cpu_vcpu_trap;
+
+#define CPU_VCPU_SBI_VERSION_MAJOR		2
+#define CPU_VCPU_SBI_VERSION_MINOR		0
+#define CPU_VCPU_SBI_IMPID			2
+
+struct cpu_vcpu_sbi_return {
+	unsigned long value;
+	struct cpu_vcpu_trap *trap;
+	bool regs_updated;
+};
+
+struct cpu_vcpu_sbi_extension {
+	const char name[16];
+	unsigned long extid_start;
+	unsigned long extid_end;
+	int (*handle)(struct vmm_vcpu *vcpu, unsigned long ext_id,
+		      unsigned long func_id, unsigned long *args,
+		      struct cpu_vcpu_sbi_return *out);
+	unsigned long (*probe)(struct vmm_vcpu *vcpu);
+};
+
+const struct cpu_vcpu_sbi_extension *cpu_vcpu_sbi_find_extension(
+						struct vmm_vcpu *vcpu,
+						unsigned long ext_id);
 
 int cpu_vcpu_sbi_ecall(struct vmm_vcpu *vcpu, ulong mcause,
 		       arch_regs_t *regs);
+
+int cpu_vcpu_sbi_init(struct vmm_vcpu *vcpu);
+
+void cpu_vcpu_sbi_deinit(struct vmm_vcpu *vcpu);
+
+int cpu_vcpu_sbi_xlate_error(int xvisor_error);
 
 #endif

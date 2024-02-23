@@ -121,11 +121,13 @@ static inline void gather_amd_features(struct cpuinfo_x86 *cpu_info)
 	cpu_info->hw_virt_available = ((c >> 2) & 1);
 
 	if (cpu_info->hw_virt_available) {
-		/* Check if nested paging is also available. */
-		cpuid(AMD_CPUID_EXTENDED_SVM_IDENTIFIER, &a, &b, &c, &d);
-		cpu_info->hw_nested_paging = (d & 0x1UL);
-		cpu_info->hw_nr_asids = b;
-		cpu_info->decode_assist = ((d >> 7) & 0x1);
+		if (cpu_info->vendor == x86_VENDOR_AMD) {
+			/* Check if nested paging is also available. */
+			cpuid(AMD_CPUID_EXTENDED_SVM_IDENTIFIER, &a, &b, &c, &d);
+			cpu_info->hw_nested_paging = (d & 0x1UL);
+			cpu_info->hw_nr_asids = b;
+			cpu_info->decode_assist = ((d >> 7) & 0x1);
+		}
 	}
 }
 
@@ -196,7 +198,7 @@ static inline void gather_intel_features(struct cpuinfo_x86 *cpu_info)
 	cpuid(CPUID_BASE_FEATURES, &a, &b, &c, &d);
 	cpu_info->hw_virt_available = ((c >> 5) & 1);
 
-	cpuid(INTEL_CPUID_EXTENDED_ADDR_BITS, &a, &b, &c, &d);
+	cpuid(CPUID_EXTENDED_ADDR_BITS, &a, &b, &c, &d);
 	cpu_info->phys_bits = (a & 0xfful);
 	cpu_info->virt_bits = ((a >> 8) & 0xfful);
 }
@@ -205,7 +207,7 @@ void indentify_cpu(void)
 {
 	u32 tmp;
 
-	cpuid(CPUID_BASE_VENDORSTRING, (u32 *)&tmp,
+	cpuid(CPUID_BASE_LFUNCSTD, (u32 *)&tmp,
 		(u32 *)&cpu_info.vendor_string[0],
 		(u32 *)&cpu_info.vendor_string[8],
 		(u32 *)&cpu_info.vendor_string[4]);

@@ -108,52 +108,6 @@ _bss_zero:
 	cmp	r1, r2
 	blt	_bss_zero
 
-	/* Determine if a valid external dtb is provided */
-	/* Get DTB address */
-	ldr     r3, __boot_reg2
-	sub     r3, r3, r6
-	add     r3, r3, r4
-	ldr     r2, [r3]
-
-	/* First check for 4B alignment */
-	tst	r2, #0x3
-	bne	align_4k_boundary
-
-	/* Now check for FDT_MAGIC */
-	ldr	r0, [r2]
-	ldr	r1, __fdt_magic
-	cmp	r0, r1
-	bne	align_4k_boundary
-
-	/* Now get the dtb total-size */
-	ldrb	r0, [r2, #4]
-	ldrb	r1, [r2, #5]
-	add	r0, r1, r0, lsl #8
-	ldrb	r1, [r2, #6]
-	add	r0, r1, r0, lsl #8
-	ldrb	r1, [r2, #7]
-	add	r0, r1, r0, lsl #8
-
-	/* Compare with max supported dtb size */
-	ldr	r1, __max_dtb_size
-	cmp	r0, r1
-	bgt	align_4k_boundary
-
-	/* Overwrite the built-in fdt with the one passed */
-	ldr	r1, __builtin_dtb
-	sub	r1, r1, r6
-	add	r1, r1, r4
-
-	/* r0 = dtb total size */
-	/* r1 = builtin_dtb load-address */
-	/* r2 = passed dtb address */
-
-dtb_save_loop:
-	ldr	r3, [r2], #4
-	str	r3, [r1], #4
-	subs	r0, r0, #4
-	bgt	dtb_save_loop
-
 align_4k_boundary:
 	/* Relocate code if load start is not 4 KB aligned */
 	mov	r0, r4
@@ -211,7 +165,10 @@ _start_mmu_init:
 	mov	r0, r4
 	mov	r1, r5
 	mov	r2, r6
-	mov	r3, r7
+	ldr     r3, __boot_reg2
+	sub     r3, r3, r6
+	add     r3, r3, r4
+	ldr     r3, [r3]
 	bl	_setup_initial_ttbl
 	ldr	r0, __httbr_set
 	sub	r0, r0, r6
@@ -284,6 +241,9 @@ _start_secondary_nopen:
 	and	r3, r3, r2
 	orr	r3, r3, r1
 	mcr     p15, 4, r3, c2, c1, 2
+	/* Setup inital vectors */
+	ldr	r1, __init_vect
+	mcr     p15, 4, r1, c12, c0, 0
 	/* Setup Hypervisor System Control Register */
 	bl	proc_setup
 	dsb
@@ -291,20 +251,10 @@ _start_secondary_nopen:
 	mcr     p15, 4, r0, c1, c0, 0
 	dsb
 	isb
-	/* Jump to reset code */
-	ldr	pc, __reset
-
+	/* We should never reach here */
 _start_hang:
 	b	.
 
-#define FDT_MAGIC	0xedfe0dd0	/* 0xd00dfeed in big-endian */
-
-__fdt_magic:
-	.word FDT_MAGIC
-__builtin_dtb:
-	.word dt_blob_start
-__max_dtb_size:
-	.word CONFIG_ARM_MAX_DTB_SIZE
 __hmair0_set:
 	.word (HMAIR0(0x00, AINDEX_DEVICE_nGnRnE) | \
 	       HMAIR0(0x00, AINDEX_DEVICE_nGnRE) | \
@@ -324,7 +274,7 @@ __htcr_set:
 	       (0x1 << HTCR_IRGN0_SHIFT) | \
 	       (0x3 << HTCR_SH0_SHIFT))
 __httbr_set:
-	.word def_ttbl
+	.word stage1_pgtbl_root
 __vtcr_clear:
 	.word ~(VTCR_T0SZ_MASK | \
 		VTCR_S_MASK | \
@@ -432,8 +382,26 @@ _copy_done:
 _copy_end:
 
 	/* 
-	 * Exception vector start.
+	 * Exception vectors
 	 */
+
+	.section .entry, "ax", %progbits
+	.balign	256
+	.globl _init_vect
+_init_vect:
+	ldr	pc, __init_reset
+	ldr	pc, __init_reset
+	ldr	pc, __init_reset
+	ldr	pc, __init_reset
+	ldr	pc, __init_reset
+	ldr	pc, __init_reset
+	ldr	pc, __init_reset
+	ldr	pc, __init_reset
+__init_vect:
+	.word _init_vect
+__init_reset:
+	.word _reset
+
 	.section .entry, "ax", %progbits
 	.balign	256
 	.globl _start_vect
@@ -537,7 +505,7 @@ _reset:
 .macro PUSH_REGS
 	push	{sp, lr}
 	push	{r0-r12}
-	mrs	r0, spsr_hyp
+	mrs	r0, spsr_all
 	mrs	r1, elr_hyp
 	push	{r0, r1}
 .endm
@@ -551,7 +519,7 @@ _reset:
 /* Pull registers from stack */
 .macro PULL_REGS
 	pop	{r0, r1}
-	msr	spsr_hyp, r0
+	msr	spsr_all, r0
 	msr	elr_hyp, r1
 	ldm	sp, {r0-r14}
 	eret

@@ -27,7 +27,6 @@
 #include <vmm_types.h>
 #include <vmm_devtree.h>
 #include <vmm_devdrv.h>
-#include <vmm_host_irqdomain.h>
 #include <libs/list.h>
 
 struct vmm_msi_msg {
@@ -39,19 +38,23 @@ struct vmm_msi_msg {
 /**
  * Platform device specific msi descriptor data
  * @msi_priv_data:	Pointer to platform private data
- * @msi_index:		The index of the MSI descriptor for multi MSI
  */
 struct vmm_platform_msi_desc {
 	struct vmm_platform_msi_priv_data	*msi_priv_data;
 	u16					msi_index;
 };
 
+struct vmm_host_irq;
+struct vmm_msi_domain;
+
 /**
  * Descriptor structure for MSI based interrupts
  * @list:	List head for management
  * @hirq:	The base interrupt number
  * @nvec_used:	The number of vectors used
+ * @msi_index:	The index of the MSI descriptor for multi MSI
  * @dev:	Pointer to the device which uses this descriptor
+ * @domain:	Pointer to the MSI domain which uses this descriptor
  * @msg:	The last set MSI message cached for reuse
  *
  * @masked:	[PCI MSI/X] Mask bits
@@ -71,7 +74,9 @@ struct vmm_msi_desc {
 	struct dlist			list;
 	unsigned int			hirq;
 	unsigned int			nvec_used;
+	unsigned int			msi_index;
 	struct vmm_device		*dev;
+	struct vmm_msi_domain		*domain;
 	struct vmm_msi_msg		msg;
 
 	union {
@@ -134,7 +139,6 @@ typedef struct vmm_msi_alloc_info {
 #define for_each_msi_entry(desc, dev)	\
 	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
 
-struct vmm_msi_domain;
 typedef void (*vmm_irq_write_msi_msg_t)(struct vmm_msi_desc *desc,
 					struct vmm_msi_msg *msg);
 
@@ -147,7 +151,6 @@ typedef void (*vmm_irq_write_msi_msg_t)(struct vmm_msi_desc *desc,
  * @msi_finish:		Optional callback to finalize the allocation
  * @set_desc:		Set the msi descriptor for an interrupt
  * @handle_error:	Optional error handler if the allocation fails
- * @msi_compose_msg	Domain specific callback to compose MSI mesage
  * @msi_write_msg	Domain specific callback to write MSI message
  *
  * All of the above callbacks are used by vmm_msi_domain_alloc_irqs()
@@ -169,10 +172,6 @@ struct vmm_msi_domain_ops {
 				    struct vmm_msi_desc *desc);
 	int		(*handle_error)(struct vmm_msi_domain *domain,
 					struct vmm_msi_desc *desc, int error);
-	int		(*msi_compose_msg)(struct vmm_msi_domain *domain,
-					   struct vmm_msi_desc *desc,
-					   unsigned int hirq, unsigned int hwirq,
-					   struct vmm_msi_msg *msg);
 	void		(*msi_write_msg)(struct vmm_msi_domain *domain,
 					 struct vmm_msi_desc *desc,
 					 unsigned int hirq, unsigned int hwirq,
@@ -241,6 +240,8 @@ static inline void *vmm_msi_domain_data(struct vmm_msi_domain *domain)
 
 struct vmm_msi_domain *vmm_msi_find_domain(struct vmm_devtree_node *fwnode,
 					   enum vmm_msi_domain_types type);
+
+void vmm_msi_domain_write_msg(struct vmm_host_irq *irq);
 
 int vmm_msi_domain_alloc_irqs(struct vmm_msi_domain *domain,
 			      struct vmm_device *dev,

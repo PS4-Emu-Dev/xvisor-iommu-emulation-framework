@@ -31,6 +31,7 @@
 #include <libs/stringlib.h>
 #include <arch_cpu.h>
 #include <arch_io.h>
+#include <arch_barrier.h>
 #include <cpu_mmu.h>
 #include <cpu_features.h>
 #include <cpu_interrupts.h>
@@ -45,6 +46,8 @@
 #include <tsc.h>
 #include <timers/timer.h>
 
+#define ENABLE_TIMER_TRACE 1
+
 #undef DEBUG_IOAPIC
 
 #ifdef DEBUG_IOAPIC
@@ -52,6 +55,78 @@
 #else
 #define debug_print(fmnt, args...) { }
 #endif
+
+#if ENABLE_TIMER_TRACE
+#define MAX_TRACE_ELEMENTS	2048
+
+typedef struct timer_irq_trace_element {
+	u64 tsc_val;
+	u64 init_val;
+	u64 cc_val;
+	u64 res;
+} timer_irq_te_t;
+
+typedef struct timer_trace_element {
+	u64 timer_val;
+	u64 tsc_val;
+	u64 cc_val;
+	u64 esr_val;
+	u64 lvt_val;
+} timer_te_t;
+
+typedef struct timer_trace {
+	u32 trace_index;
+	u32 trace_irq_index;
+	u32 wraps;
+	u32 irq_wraps;
+	u32 irqs;
+	timer_te_t trace_buf[MAX_TRACE_ELEMENTS];
+	timer_irq_te_t trace_irq_buf[MAX_TRACE_ELEMENTS];
+} timer_trace_t;
+
+static timer_trace_t timer_trace;
+
+void init_trace_timer(void)
+{
+	memset(&timer_trace, 0, sizeof(timer_trace));
+}
+
+void trace_timer(u64 next, u64 tsc, u64 cc, u64 esr, u64 lvt)
+{
+	timer_te_t *te = &timer_trace.trace_buf[timer_trace.trace_index];
+
+	te->timer_val = next;
+	te->tsc_val = tsc;
+	te->cc_val = cc;
+	te->esr_val = esr;
+	te->lvt_val = lvt;
+
+	timer_trace.trace_index++;
+	timer_trace.trace_index %= MAX_TRACE_ELEMENTS;
+	if (timer_trace.trace_index == 0)
+		timer_trace.wraps++;
+}
+
+void trace_timer_irq(u64 tsc, u64 cc, u64 init)
+{
+	timer_irq_te_t *tie = &timer_trace.trace_irq_buf[timer_trace.trace_irq_index];
+
+	tie->tsc_val = tsc;
+	tie->cc_val = cc;
+	tie->init_val = init;
+
+	timer_trace.irqs++;
+	timer_trace.trace_irq_index++;
+	timer_trace.trace_irq_index %= MAX_TRACE_ELEMENTS;
+	if (timer_trace.trace_irq_index == 0)
+		timer_trace.irq_wraps++;
+}
+
+#else
+void init_trace_timer(void) {}
+void trace_timer(u64 next, u64 tsc, u64 cc, u64 esr, u64 lvt) {}
+void trace_timer_irq(u64 tsc, u64 cc, u64 init) {}
+#endif /* ENABLE_TIMER_TRACE */
 
 /* FIXME we should spread the irqs across as many priority levels as possible
  * due to buggy hw */
@@ -89,7 +164,7 @@ static u32 is_lapic_present(void)
 	cpuid(CPUID_BASE_FEATURES,
 	      &a, &b, &c, &d);
 
-	return (d & CPUID_FEAT_EDX_APIC);
+	return (d & CPUID_BASE_FEAT_BIT(FEATURES, EDX, APIC));
 }
 
 static inline u32 lapic_read(virtual_addr_t base)
@@ -395,10 +470,14 @@ static int setup_lapic(int cpu)
 
 	this_cpu(lapic).msr = cpu_read_msr(MSR_IA32_APICBASE);
 
+	init_trace_timer();
+
 	if (!APIC_ENABLED(this_cpu(lapic).msr)) {
 		this_cpu(lapic).msr |= (0x1UL << 11);
 		cpu_write_msr(MSR_IA32_APICBASE, this_cpu(lapic).msr);
 	}
+
+	INIT_SPIN_LOCK(&this_cpu(lapic).lock);
 
 	this_cpu(lapic).pbase = (APIC_BASE(this_cpu(lapic).msr) << 12);
 
@@ -430,6 +509,10 @@ int apic_init(void)
 /******************************/
 /* LAPIC TIMER INITIALIZATION */
 /******************************/
+static void lapic_set_timer_count(u32 count, int periodic);
+static void lapic_stop_timer(void);
+
+
 struct lapic_timer {
 	u8 timer_name[APIC_NAME_LEN];
 	u32 timer_cpu;
@@ -441,6 +524,7 @@ struct lapic_timer {
 	struct vmm_clocksource clksrc;
 } lapic_sys_timer = { 0 };
 
+#ifdef CONFIG_USE_DEADLINE_TSC
 int is_tsc_deadline_supported(void)
 {
 	u32 a, b, c, d;
@@ -450,11 +534,24 @@ int is_tsc_deadline_supported(void)
 
 	return (c & CPUID_FEAT_ECS_TSCDL);
 }
+#endif
 
 static vmm_irq_return_t
 lapic_clockchip_irq_handler(int irq_no, void *dev)
 {
 	struct lapic_timer *timer = (struct lapic_timer *)dev;
+	u64 cc, init;
+
+	cc = lapic_read(LAPIC_TIMER_CCR(this_cpu(lapic).vbase));
+	init = lapic_read(LAPIC_TIMER_ICR(this_cpu(lapic).vbase));
+	trace_timer_irq(get_tsc_serialized(), cc, init);
+
+#ifndef CONFIG_USE_DEADLINE_TSC
+	/* when using incremental count mode, just set the count
+	 * to zero and set the mask */
+	if (!this_cpu(lapic).deadline_supported)
+		lapic_stop_timer();
+#endif
 
 	if (unlikely(!timer->clkchip.event_handler))
 		return VMM_IRQ_NONE;
@@ -492,11 +589,15 @@ static int
 lapic_arm_timer(struct lapic_timer *timer)
 {
 	u32 lvt;
+	u32 flags;
+
+	vmm_spin_lock_irqsave(&this_cpu(lapic).lock, flags);
 
 	lvt = lapic_read(LAPIC_LVTTR(this_cpu(lapic).vbase));
 	lvt &= ~APIC_LVT_MASKED;
 	lapic_write(LAPIC_LVTTR(this_cpu(lapic).vbase), lvt);
 	timer->armed = 1;
+	vmm_spin_unlock_irqrestore(&this_cpu(lapic).lock, flags);
 
 	return VMM_OK;
 }
@@ -505,32 +606,28 @@ static __unused int
 lapic_disarm_timer(struct lapic_timer *timer)
 {
 	u32 lvt;
+	u32 flags;
+
+	vmm_spin_lock_irqsave(&this_cpu(lapic).lock, flags);
 
 	lvt = lapic_read(LAPIC_LVTTR(this_cpu(lapic).vbase));
 	lvt |= APIC_LVT_MASKED;
 	lapic_write(LAPIC_LVTTR(this_cpu(lapic).vbase), lvt);
 	timer->armed = 0;
+	vmm_spin_unlock_irqrestore(&this_cpu(lapic).lock, flags);
 
 	return VMM_OK;
 }
 
+#ifdef CONFIG_USE_DEADLINE_TSC
 static int
-lapic_clockchip_set_next_event(unsigned long next,
-			       struct vmm_clockchip *cc)
+lapic_set_deadline(unsigned long next)
 {
 	u64 res;
 	u32 nr_tries = 5;
-	struct lapic_timer *timer = container_of(cc, struct lapic_timer,
-						 clkchip);
-	BUG_ON(timer == NULL);
-
-	if (unlikely(!timer->armed)) {
-		lapic_arm_timer(timer);
-		timer->armed = 1;
-	}
 
 	/* This can be racey. So try for 5 times */
- _tryagain:
+_tryagain:
 	res = get_tsc_serialized();
 	res += next;
 	cpu_write_msr(MSR_IA32_TSC_DEADLINE, res);
@@ -540,31 +637,84 @@ lapic_clockchip_set_next_event(unsigned long next,
 		nr_tries--;
 		goto _tryagain;
 	}
+
 	return VMM_OK;
+}
+#endif
+
+static int
+lapic_set_icr(unsigned long next)
+{
+	/* set the timer in one-shot mode. */
+	/* xvisor doesn't use periodic mode. */
+	lapic_set_timer_count(next, 0);
+
+	return VMM_OK;
+}
+
+static int
+lapic_clockchip_set_next_event(unsigned long next,
+			       struct vmm_clockchip *cc)
+{
+	struct lapic_timer *timer = container_of(cc, struct lapic_timer,
+						 clkchip);
+	u32 flags;
+	int rc;
+
+	BUG_ON(timer == NULL);
+
+	vmm_spin_lock_irqsave(&this_cpu(lapic).lock, flags);
+
+	if (unlikely(!timer->armed)) {
+		lapic_arm_timer(timer);
+		timer->armed = 1;
+	}
+
+	trace_timer(next, get_tsc_serialized(),
+		    lapic_read(LAPIC_TIMER_CCR(this_cpu(lapic).vbase)),
+		    lapic_read(LAPIC_ESR(this_cpu(lapic).vbase)),
+		    lapic_read(LAPIC_LVTTR(this_cpu(lapic).vbase)));
+
+#ifdef CONFIG_USE_DEADLINE_TSC
+	if (this_cpu(lapic).deadline_supported)
+		return lapic_set_deadline(next);
+#endif
+
+	rc = lapic_set_icr(next);
+	vmm_spin_unlock_irqrestore(&this_cpu(lapic).lock, flags);
+
+	return rc;
 }
 
 static void
 lapic_timer_irq_mask(struct vmm_host_irq *irq)
 {
 	struct lapic_timer *timer = (struct lapic_timer *)irq->chip_data;
-	u32 lvt;
+	u32 lvt, flags;
+
+	vmm_spin_lock_irqsave(&this_cpu(lapic).lock, flags);
 
 	/* Disable the local APIC timer */
 	lvt = lapic_read(LAPIC_LVTTR(timer->lapic->vbase));
 	lvt |= APIC_LVT_MASKED;
 	lapic_write(LAPIC_LVTTR(timer->lapic->vbase), lvt);
+	vmm_spin_unlock_irqrestore(&this_cpu(lapic).lock, flags);
 }
 
 static void
 lapic_timer_irq_unmask(struct vmm_host_irq *irq)
 {
 	struct lapic_timer *timer = (struct lapic_timer *)irq->chip_data;
-	u32 lvt;
+	u32 lvt, flags;
+
+	vmm_spin_lock_irqsave(&this_cpu(lapic).lock, flags);
 
 	/* Disable the local APIC timer */
 	lvt = lapic_read(LAPIC_LVTTR(timer->lapic->vbase));
 	lvt &= ~APIC_LVT_MASKED;
 	lapic_write(LAPIC_LVTTR(timer->lapic->vbase), lvt);
+
+	vmm_spin_unlock_irqrestore(&this_cpu(lapic).lock, flags);
 }
 
 int __cpuinit lapic_clockchip_init(void)
@@ -593,9 +743,14 @@ int __cpuinit lapic_clockchip_init(void)
 
 	lvt = lapic_read(LAPIC_LVTTR(this_cpu(lapic).vbase));
 
-	/* Set the LAPIC timer in Deadline mode */
-	lvt &= ~(0x3<<17);
-	lvt |= APIC_LVT_TIMER_TSCDL;
+#ifdef CONFIG_USE_DEADLINE_TSC
+	/* AMD doesn't support deadline mode */
+	if (this_cpu(lapic).deadline_supported) {
+		/* Set the LAPIC timer in Deadline mode */
+		lvt &= ~(0x3<<17);
+		lvt |= APIC_LVT_TIMER_TSCDL;
+	}
+#endif
 
 	/* set the LAPIC timer interrupt vector */
 	lvt |= (LAPIC_TIMER_IRQ_VECTOR & 0xFF);
@@ -608,10 +763,15 @@ int __cpuinit lapic_clockchip_init(void)
 				   NSEC_PER_SEC,
 				   (lapic_sys_timer.freq_khz*1000),
 				   5);
-	lapic_sys_timer.clkchip.min_delta_ns = 100000;
+	lapic_sys_timer.clkchip.min_delta_ns = 10000000;
 	lapic_sys_timer.clkchip.max_delta_ns =
-		vmm_clockchip_delta2ns(0x7FFFFFFFFFFFFFFULL,
+		vmm_clockchip_delta2ns(0x7FFFFFFFUL,
 				       &lapic_sys_timer.clkchip);
+
+	vmm_printf("%s: LAPIC Freq: %ukhz Max Delta NS: %lu\n",
+		   __func__, lapic_sys_timer.freq_khz,
+		   lapic_sys_timer.clkchip.max_delta_ns);
+
 	lapic_sys_timer.clkchip.set_mode = &lapic_clockchip_set_mode;
 	lapic_sys_timer.clkchip.set_next_event =
 		&lapic_clockchip_set_next_event;
@@ -687,6 +847,7 @@ pit_calibrate_tsc(void)
 	return (end - start)/50;
 }
 
+/* NOTE: lapic lock should be held before calling this */
 static void
 lapic_set_timer_count(u32 count, int periodic)
 {
@@ -694,9 +855,6 @@ lapic_set_timer_count(u32 count, int periodic)
 
 	/* Setup Divide Count Register to use the bus frequency directl. */
 	lapic_write(LAPIC_TIMER_DCR(this_cpu(lapic).vbase), LAPIC_TDR_DIV_1);
-
-	/* Program the initial count register */
-	lapic_write(LAPIC_TIMER_ICR(this_cpu(lapic).vbase), count);
 
 	/* Enable the local APIC timer */
 	lvt = lapic_read(LAPIC_LVTTR(this_cpu(lapic).vbase));
@@ -707,9 +865,14 @@ lapic_set_timer_count(u32 count, int periodic)
 		lvt &= ~APIC_LVT_TIMER_PERIODIC;
 
 	lapic_write(LAPIC_LVTTR(this_cpu(lapic).vbase), lvt);
+
+	arch_wmb();
+
+	/* Program the initial count register */
+	lapic_write(LAPIC_TIMER_ICR(this_cpu(lapic).vbase), count);
 }
 
-void
+static void
 lapic_stop_timer(void)
 {
 	u32 lvt;
@@ -719,12 +882,18 @@ lapic_stop_timer(void)
 
 	/* Disable the local APIC timer */
 	lvt = lapic_read(LAPIC_LVTTR(this_cpu(lapic).vbase));
-	/*
-	 * If operating in Deadline mode MSR needs to be zeroed to
-	 * disable timer.
-	 */
-	if ((lvt & (0x3 << 17)) == APIC_LVT_TIMER_TSCDL)
-		cpu_write_msr(MSR_IA32_TSC_DEADLINE, 0);
+
+#ifdef CONFIG_USE_DEADLINE_TSC
+	if (this_cpu(lapic).deadline_supported) {
+		/*
+		* If operating in Deadline mode MSR needs to be zeroed to
+		* disable timer.
+		*/
+		if ((lvt & (0x3 << 17)) == APIC_LVT_TIMER_TSCDL)
+			cpu_write_msr(MSR_IA32_TSC_DEADLINE, 0);
+	}
+#endif
+
 	lvt |= APIC_LVT_MASKED;
 	lapic_write(LAPIC_LVTTR(this_cpu(lapic).vbase), lvt);
 }
@@ -762,6 +931,7 @@ int __init
 lapic_timer_init(void)
 {
 	struct x86_system_timer_ops lapic_sys_timer_ops;
+	struct cpu_lapic *lapic = NULL;
 
 	lapic_sys_timer_ops.sys_cc_init = &lapic_clockchip_init;
 	lapic_sys_timer_ops.sys_cs_init = &lapic_clocksource_init;
@@ -771,9 +941,17 @@ lapic_timer_init(void)
 		return VMM_EFAIL;
 	}
 
-	if (!is_tsc_deadline_supported()) {
-		vmm_printf("%s: TSC Deadline is not supported by LAPIC\n", __func__);
-		return VMM_EFAIL;
+	lapic = &this_cpu(lapic);
+
+#ifdef CONFIG_USE_DEADLINE_TSC
+	if (is_tsc_deadline_supported()) {
+		vmm_printf("%s: Using TSC deadline mode.\n", __func__);
+		lapic->deadline_supported = 1;
+	} else
+#endif
+	{
+		vmm_printf("%s: Using LAPIC's internal counter as comparator.\n", __func__);
+		lapic->deadline_supported = 0;
 	}
 
 	/* save the calibrated CPU frequency */
@@ -786,7 +964,7 @@ lapic_timer_init(void)
 	 * needs to be programmed with same frequency.
 	 */
 	lapic_sys_timer.freq_khz = cpu_info.tsc_khz;
-	lapic_sys_timer.lapic = &this_cpu(lapic);
+	lapic_sys_timer.lapic = lapic;
 	lapic_sys_timer.timer_cpu = vmm_smp_processor_id();
 	vmm_snprintf((char *)&lapic_sys_timer.timer_name[0], APIC_NAME_LEN,
 		     "LAPIC-%d", vmm_smp_processor_id());

@@ -16,7 +16,7 @@ partition of SD card:
 Following are steps to create these images and boot Xvisor on ZynqMP:
 
   [1. Build environment]
-  # export CROSS_COMPILE=aarch64-linux-gnu-
+  # export CROSS_COMPILE=aarch64-none-linux-gnu-
 
   [2. GoTo Xvisor source directory]
   # cd <xvisor_source_directory>
@@ -88,7 +88,7 @@ Following are steps to create these images and boot Xvisor on ZynqMP:
 
   [16. Copy uvmm.bin, DTB, and udisk.img to data partition of SD card]
   # cp -f build/uvmm.bin <path_to_mounted_data_partition_of_sd_card>
-  # cp -f build/arch/arm/board/generic/dts/xilinx/zynqmp-zcu102.dtb <path_to_mounted_data_partition_of_sd_card>
+  # cp -f build/arch/arm/dts/xilinx/zynqmp-zcu102.dtb <path_to_mounted_data_partition_of_sd_card>
   # cp -f build/udisk.img <path_to_mounted_data_partition_of_sd_card>
 
   [17. Unmount data partition (or partition 0) of SD card from your development machine]

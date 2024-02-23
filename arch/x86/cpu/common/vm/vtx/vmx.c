@@ -33,40 +33,21 @@
 #include <vm/vmcs.h>
 #include <vm/vmx.h>
 #include <vm/vmx_intercept.h>
+#include <vm/vmcs_auditor.h>
+#include <x86_debug_log.h>
+
+DEFINE_X86_DEBUG_LOG_SUBSYS_LEVEL(vmx, X86_DEBUG_LOG_LVL_INFO);
+
+extern void vmx_vcpu_exit(struct vcpu_hw_context *context);
 
 extern struct vmcs *alloc_vmcs(void);
 extern u32 vmxon_region_nr_pages;
 extern u32 vmcs_revision_id;
 
-/* IMS: Table 30-1 Section 30.4 */
-static char *ins_err_str[] = {
-	"Index zero invalid\n",
-	"VMCALL executed in VMX root operation",
-	"VMCLEAR with invalid physical address",
-	"VMCLEAR with VMXON pointer",
-	"VMLAUNCH with non-clear VMCS",
-	"VMRESUME with non-launched VMCS",
-	"VMRESUME after VMXOFF (VMXOFF and VMXON between VMLAUNCH and VMRESUME)",
-	"VM entry with invalid control field(s)",
-	"VM entry with invalid host-state field(s)",
-	"VMPTRLD with invalid physical address",
-	"VMPTRLD with VMXON pointer",
-	"VMPTRLD with incorrect VMCS revision identifier",
-	"VMREAD/VMWRITE from/to unsupported VMCS component",
-	"VMWRITE to read-only VMCS component",
-	"VMXON executed in VMX root operation",
-	"VM entry with invalid executive-VMCS pointer",
-	"VM entry with non-launched executive VMCS",
-	"VM entry with executive-VMCS pointer not VMXON pointer",
-	"VMCALL with non-clear VMCS",
-	"VMCALL with invalid VM-exit control fields",
-	"VMCALL with incorrect MSEG revision identifier",
-	"VMXOFF under dual-monitor treatment of SMIs and SMM",
-	"VMCALL with invalid SMM-monitor features",
-	"VM entry with invalid VM-execution control fields in executive VMCS",
-	"VM entry with events blocked by MOV SS",
-	"Invalid operand to INVEPT/INVVPID"
-};
+u64 vmx_cr0_fixed0;
+u64 vmx_cr0_fixed1;
+u64 vmx_cr4_fixed0;
+u64 vmx_cr4_fixed1;
 
 DEFINE_PER_CPU(physical_addr_t, vmxon_region_pa);
 DEFINE_PER_CPU(virtual_addr_t, vmxon_region);
@@ -77,8 +58,7 @@ static int enable_vmx (struct cpuinfo_x86 *cpuinfo)
 {
 	u32 eax, edx;
 	int bios_locked;
-	u64 cr0, cr4, vmx_cr0_fixed0, vmx_cr0_fixed1;
-	u64 vmx_cr4_fixed0, vmx_cr4_fixed1;
+	u64 cr0, cr4;
 	u32 *vmxon_rev = NULL;
 	int ret = VMM_OK;
 	void *vmx_on_region;
@@ -86,7 +66,7 @@ static int enable_vmx (struct cpuinfo_x86 *cpuinfo)
 
 	/* FIXME: Detect VMX support */
 	if (!cpuinfo->hw_virt_available) {
-		VM_LOG(LVL_ERR, "No VMX feature!\n");
+		X86_DEBUG_LOG(vmx, LVL_ERR, "No VMX feature!\n");
 		return VMM_EFAIL;
 	}
 
@@ -95,12 +75,12 @@ static int enable_vmx (struct cpuinfo_x86 *cpuinfo)
 
 	/* EPT and VPID support is required */
 	if (!cpu_has_vmx_ept) {
-		VM_LOG(LVL_ERR, "No EPT support!\n");
+		X86_DEBUG_LOG(vmx, LVL_ERR, "No EPT support!\n");
 		return VMM_EFAIL;
 	}
 
 	if (!cpu_has_vmx_vpid) {
-		VM_LOG(LVL_ERR, "No VPID support!\n");
+		X86_DEBUG_LOG(vmx, LVL_ERR, "No VPID support!\n");
 		return VMM_EFAIL;
 	}
 
@@ -139,17 +119,17 @@ static int enable_vmx (struct cpuinfo_x86 *cpuinfo)
 	cr0 = read_cr0();
 	cr4 = read_cr4();
 
-	VM_LOG(LVL_VERBOSE, "CR0: 0x%lx CR4: 0x%lx\n", cr0, cr4);
+	X86_DEBUG_LOG(vmx, LVL_VERBOSE, "CR0: 0x%lx CR4: 0x%lx\n", cr0, cr4);
 
 	if ((~cr0 & vmx_cr0_fixed0) || (cr0 & ~vmx_cr0_fixed1)) {
-		VM_LOG(LVL_ERR, "Some settings of host CR0 are not allowed in VMX"
+		X86_DEBUG_LOG(vmx, LVL_ERR, "Some settings of host CR0 are not allowed in VMX"
 		       " operation. (Host CR0: 0x%lx CR0 Fixed0: 0x%lx CR0 Fixed1: 0x%lx)\n",
 		       cr0, vmx_cr0_fixed0, vmx_cr0_fixed1);
 		return VMM_EFAIL;
 	}
 
 	if ((~cr4 & vmx_cr4_fixed0) || (cr4 & ~vmx_cr4_fixed1)) {
-		VM_LOG(LVL_ERR, "Some settings of host CR4 are not allowed in VMX"
+		X86_DEBUG_LOG(vmx, LVL_ERR, "Some settings of host CR4 are not allowed in VMX"
 		       " operation. (Host CR4: 0x%lx CR4 Fixed0: 0x%lx CR4 Fixed1: 0x%lx)\n",
 		       cr4, vmx_cr4_fixed0, vmx_cr4_fixed1);
 		return VMM_EFAIL;
@@ -164,43 +144,43 @@ static int enable_vmx (struct cpuinfo_x86 *cpuinfo)
 	bios_locked = !!(eax & IA32_FEATURE_CONTROL_MSR_LOCK);
 	if (bios_locked) {
 		if (!(eax & IA32_FEATURE_CONTROL_MSR_ENABLE_VMXON_OUTSIDE_SMX) ) {
-			VM_LOG(LVL_ERR, "VMX disabled by BIOS.\n");
+			X86_DEBUG_LOG(vmx, LVL_ERR, "VMX disabled by BIOS.\n");
 			return VMM_EFAIL;
 		}
 	}
 
 	vmx_on_region = alloc_vmx_on_region();
 	if (vmx_on_region == NULL) {
-		VM_LOG(LVL_ERR, "Failed to create vmx on region.\n");
+		X86_DEBUG_LOG(vmx, LVL_ERR, "Failed to create vmx on region.\n");
 		ret = VMM_ENOMEM;
 		goto _fail;
 	}
 
 	if (vmm_host_va2pa((virtual_addr_t)vmx_on_region,
 			   &vmx_on_region_pa) != VMM_OK) {
-		VM_LOG(LVL_ERR, "Critical conversion of vmx on regsion VA=>PA failed!\n");
+		X86_DEBUG_LOG(vmx, LVL_ERR, "Critical conversion of vmx on regsion VA=>PA failed!\n");
 		ret = VMM_EINVALID;
 		goto _fail;
 	}
 
-	VM_LOG(LVL_VERBOSE, "%s: VMCS Revision Identifier: 0x%x\n",
+	X86_DEBUG_LOG(vmx, LVL_VERBOSE, "%s: VMCS Revision Identifier: 0x%x\n",
 	       __func__, vmcs_revision_id);
 
 	vmxon_rev  = (u32 *)vmx_on_region;
 	*vmxon_rev = vmcs_revision_id;
 	*vmxon_rev &= ~(0x1UL  << 31);
 
-	VM_LOG(LVL_VERBOSE, "%s: VMXON PTR: 0x%lx\n", __func__,
+	X86_DEBUG_LOG(vmx, LVL_VERBOSE, "%s: VMXON PTR: 0x%lx\n", __func__,
 	       (unsigned long)vmx_on_region_pa);
 
 	/* get in VMX ON  state */
 	if ((ret = __vmxon(vmx_on_region_pa)) != VMM_OK) {
-		VM_LOG(LVL_ERR, "VMXON returned with error: %d\n", ret);
+		X86_DEBUG_LOG(vmx, LVL_ERR, "VMXON returned with error: %d\n", ret);
 		ret = VMM_EACCESS;
 		goto _fail;
 	}
 
-	VM_LOG(LVL_INFO, "%s: Entered VMX operations successfully!\n", __func__);
+	X86_DEBUG_LOG(vmx, LVL_INFO, "%s: Entered VMX operations successfully!\n", __func__);
 
 	this_cpu(vmxon_region) = (virtual_addr_t)vmx_on_region;
 	this_cpu(vmxon_region_pa) = vmx_on_region_pa;
@@ -213,15 +193,18 @@ static int enable_vmx (struct cpuinfo_x86 *cpuinfo)
 
 static int __vmcs_run(struct vcpu_hw_context *context, bool resume)
 {
-	int rc = 0;
-	u64 ins_err = 0;
+	context->instruction_error = 0;
+	if (context->sign != 0xdeadbeef) {
+		vmm_printf("Context: 0x%p Sign: 0x%x\n", context, context->sign);
+		BUG();
+	}
 
-	__asm__ __volatile__("cli\n\t"
-			     "pushfq\n\t" /* Save flags */
-			     "movq %%rsp, %%rax\n\t" /* Save host RSP */
-			     "vmwrite %%rax, %%rdx\n\t"
+	__asm__ __volatile__("pushfq\n\t" /* Save flags */
+			     /* save return address in host space area */
 			     "movq $vmx_return, %%rax\n\t"
-			     "vmwrite %%rax, %%rbx\n\t" /* Save host RIP */
+			     "vmwrite %%rax, %%rbx\n\t"
+			     "jz 8f\n\t"
+			     "jc 8f\n\t"
 			     "pushq %%rbp\n\t"
 			     "pushq %%rdi\n\t"
 			     "pushq %%rsi\n\t"
@@ -233,7 +216,13 @@ static int __vmcs_run(struct vcpu_hw_context *context, bool resume)
 			     "pushq %%r13\n\t"
 			     "pushq %%r14\n\t"
 			     "pushq %%r15\n\t"
+			     /* save the hardware context pointer */
 			     "pushq %%rcx\n\t"
+			     /* save host RSP in host state area */
+			     "movq %%rsp, %%rax\n\t"
+			     "vmwrite %%rax, %%rdx\n\t"
+			     "jz 9f\n\t"
+			     "jc 9f\n\t"
 			     /*
 			      * Check if vmlaunch or vmresume is needed, set the condition code
 			      * appropriately for use below.
@@ -268,7 +257,7 @@ static int __vmcs_run(struct vcpu_hw_context *context, bool resume)
 			       */
 			     "ud2\n\t"
 			     ".section .fixup,\"ax\"\n"
-			     "2:sub $3, %0 ; jmp 7f\n" /* Return -3 if #UD or #GF */
+			     "2:movq $3, (%[context]) ; jmp 7f\n" /* Return -3 if #UD or #GF */
 			     ".previous\n"
 			     ".section __ex_table,\"a\"\n"
 			     "   "__FIXUP_ALIGN"\n"
@@ -283,13 +272,14 @@ static int __vmcs_run(struct vcpu_hw_context *context, bool resume)
 			       */
 			     "ud2\n\t"
 			     ".section .fixup,\"ax\"\n"
-			     "4:sub $4, %0 ; jmp 7f\n" /* Return -4 if #UD or #GF */
+			     "4:movq $4, (%[context]) ; jmp 7f\n" /* Return -4 if #UD or #GF */
 			     ".previous\n"
 			     ".section __ex_table,\"a\"\n"
 			     "   "__FIXUP_ALIGN"\n"
 			     "   "__FIXUP_WORD" 3b,4b\n"
 			     ".previous\n"
-
+			     "8: movq $8, (%[context]); jmp 10f\n" /* vmwrite failure */
+			     "9: movq $9, (%[context]); jmp 11f\n" /* rsp vmwrite fail */
 			     /* We shall come here only on successful VMEXIT */
 			     "vmx_return: \n\t"
 			     /*
@@ -342,7 +332,7 @@ static int __vmcs_run(struct vcpu_hw_context *context, bool resume)
 			     "popq %%rdi\n\t"
 			     "popq %%rbp\n\t"
 			     "popfq\n\t"
-			     "sub $1, %0\n\t" /* -1 valid failure */
+			     "movq $1, (%[context])\n\t" /* -1 valid failure */
 			     "jmp 7f\n\t"
 			     "6:popq %%rcx\n\t"
 			     "popq %%r15\n\t"
@@ -357,9 +347,24 @@ static int __vmcs_run(struct vcpu_hw_context *context, bool resume)
 			     "popq %%rdi\n\t"
 			     "popq %%rbp\n\t"
 			     "popfq\n\t"
-			     "sub $2, %0\n\t" /* -2 invalid failure */
+			     "movq $2, (%[context])\n\t" /* -2 invalid failure */
+			     "jmp 7f\n\t"
+			     "11:popq %%rcx\n\t"
+			     "popq %%r15\n\t"
+			     "popq %%r14\n\t"
+			     "popq %%r13\n\t"
+			     "popq %%r12\n\t"
+			     "popq %%r11\n\t"
+			     "popq %%r10\n\t"
+			     "popq %%r9\n\t"
+			     "popq %%r8\n\t"
+			     "popq %%rsi\n\t"
+			     "popq %%rdi\n\t"
+			     "popq %%rbp\n\t"
+			     "10:"
+			     "popfq\n\t"
 			     "7:sti\n\t"
-			     :"=q"(rc)
+			     :
 			     :[resume]"m"(resume), "d"((unsigned long)HOST_RSP),
 			      [context]"c"(context), "b"((unsigned long)HOST_RIP),
 			      [rax]"i"(offsetof(struct vcpu_hw_context, g_regs[GUEST_REGS_RAX])),
@@ -383,18 +388,14 @@ static int __vmcs_run(struct vcpu_hw_context *context, bool resume)
 	/* TR is not reloaded back the cpu after VM exit. */
 	reload_host_tss();
 
-	if (rc == -1) {
-		if ((rc = __vmread(VM_INSTRUCTION_ERROR, &ins_err)) == VMM_OK) {
-			vmm_printf("Instruction Error: (%s:%ld)\n", ins_err_str[ins_err], ins_err);
-			//vmcs_dump(context);
-		} else
-			vmm_printf("Failed to read instruction error (%d)\n", rc);
-		while(1);
-		//BUG();
-	} else if (rc == -2) {
-		/* Invalid error: which probably means there is not current VMCS: Problem! */
-		if (context->vcpu_emergency_shutdown)
-			context->vcpu_emergency_shutdown(context);
+	if (context->sign != 0xdeadbeef) {
+		vmm_printf("Context: 0x%p Sign: 0x%x\n", context, context->sign);
+		BUG();
+	}
+
+	if (context->instruction_error != 0) {
+		vmm_printf("VM Entry failed: Error: %d\n", context->instruction_error);
+		BUG();
 	}
 
 	arch_guest_handle_vm_exit(context);
@@ -480,6 +481,10 @@ int intel_setup_vm_control(struct vcpu_hw_context *context)
 	/* Monitor the coreboot's debug port output */
 	enable_ioport_intercept(context, 0x80);
 
+#ifdef CONFIG_ENABLE_VTX_GUEST_CONFIG_AUDIT
+	audit_vmcs(0, vmcs_revision_id, this_cpu(vmxon_region_pa));
+#endif
+
 	return VMM_OK;
 
  _fail:
@@ -493,7 +498,7 @@ int __init intel_init(struct cpuinfo_x86 *cpuinfo)
 {
 	/* Enable VMX */
 	if (enable_vmx(cpuinfo) != VMM_OK) {
-		VM_LOG(LVL_ERR, "ERROR: Failed to enable virtual machine.\n");
+		X86_DEBUG_LOG(vmx, LVL_ERR, "ERROR: Failed to enable virtual machine.\n");
 		return VMM_EFAIL;
 	}
 

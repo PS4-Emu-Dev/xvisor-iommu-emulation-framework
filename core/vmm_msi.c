@@ -23,12 +23,32 @@
 
 #include <vmm_error.h>
 #include <vmm_heap.h>
+#include <vmm_host_irq.h>
+#include <vmm_host_irqdomain.h>
 #include <vmm_spinlocks.h>
 #include <vmm_msi.h>
 #include <libs/stringlib.h>
 
 static DEFINE_SPINLOCK(msi_lock);
 static LIST_HEAD(msi_domain_list);
+
+static int msi_domain_ops_init(struct vmm_msi_domain *domain,
+			       unsigned int hirq, unsigned int hwirq,
+			       vmm_msi_alloc_info_t *arg)
+{
+	return 0;
+}
+
+static void msi_domain_ops_free(struct vmm_msi_domain *domain,
+				unsigned int hirq)
+{
+}
+
+static int msi_domain_ops_check(struct vmm_msi_domain *domain,
+				struct vmm_device *dev)
+{
+	return 0;
+}
 
 static int msi_domain_ops_prepare(struct vmm_msi_domain *domain,
 				  struct vmm_device *dev,
@@ -38,30 +58,38 @@ static int msi_domain_ops_prepare(struct vmm_msi_domain *domain,
 	return 0;
 }
 
+static void msi_domain_ops_finish(vmm_msi_alloc_info_t *arg, int retval)
+{
+}
+
 static void msi_domain_ops_set_desc(vmm_msi_alloc_info_t *arg,
 				    struct vmm_msi_desc *desc)
 {
 	arg->desc = desc;
 }
 
-static int msi_domain_ops_init(struct vmm_msi_domain *domain,
-			       unsigned int hirq, unsigned int hwirq,
-			       vmm_msi_alloc_info_t *arg)
+static int msi_domain_ops_handle_error(struct vmm_msi_domain *domain,
+				       struct vmm_msi_desc *desc, int error)
 {
-	return 0;
+	return error;
 }
 
-static int msi_domain_ops_check(struct vmm_msi_domain *domain,
-				struct vmm_device *dev)
+static void msi_domain_ops_write_msg(struct vmm_msi_domain *domain,
+				     struct vmm_msi_desc *desc,
+				     unsigned int hirq, unsigned int hwirq,
+				     struct vmm_msi_msg *msg)
 {
-	return 0;
 }
 
 static struct vmm_msi_domain_ops msi_domain_ops_default = {
 	.msi_init	= msi_domain_ops_init,
+	.msi_free	= msi_domain_ops_free,
 	.msi_check	= msi_domain_ops_check,
 	.msi_prepare	= msi_domain_ops_prepare,
+	.msi_finish	= msi_domain_ops_finish,
 	.set_desc	= msi_domain_ops_set_desc,
+	.handle_error	= msi_domain_ops_handle_error,
+	.msi_write_msg	= msi_domain_ops_write_msg,
 };
 
 static void vmm_msi_domain_update_dom_ops(struct vmm_msi_domain *domain)
@@ -75,12 +103,20 @@ static void vmm_msi_domain_update_dom_ops(struct vmm_msi_domain *domain)
 
 	if (ops->msi_init == NULL)
 		ops->msi_init = msi_domain_ops_default.msi_init;
+	if (ops->msi_free == NULL)
+		ops->msi_free = msi_domain_ops_default.msi_free;
 	if (ops->msi_check == NULL)
 		ops->msi_check = msi_domain_ops_default.msi_check;
 	if (ops->msi_prepare == NULL)
 		ops->msi_prepare = msi_domain_ops_default.msi_prepare;
+	if (ops->msi_finish == NULL)
+		ops->msi_finish = msi_domain_ops_default.msi_finish;
 	if (ops->set_desc == NULL)
 		ops->set_desc = msi_domain_ops_default.set_desc;
+	if (ops->handle_error == NULL)
+		ops->handle_error = msi_domain_ops_default.handle_error;
+	if (ops->msi_write_msg == NULL)
+		ops->msi_write_msg = msi_domain_ops_default.msi_write_msg;
 }
 
 struct vmm_msi_desc *vmm_alloc_msi_entry(struct vmm_device *dev)
@@ -211,12 +247,30 @@ struct vmm_msi_domain *vmm_msi_find_domain(struct vmm_devtree_node *fwnode,
 	return domain;
 }
 
+void vmm_msi_domain_write_msg(struct vmm_host_irq *irq)
+{
+	struct vmm_msi_desc *desc = vmm_host_irq_get_msi_data(irq);
+	struct vmm_msi_domain_ops *ops;
+	struct vmm_msi_domain *domain;
+	int ret;
+
+	if (!desc || !desc->domain)
+		return;
+	domain = desc->domain;
+	ops = domain->ops;
+
+	memset(&desc->msg, 0, sizeof(desc->msg));
+	ret = vmm_host_irq_compose_msi_msg(irq->num, &desc->msg);
+	BUG_ON(ret < 0);
+	ops->msi_write_msg(domain, desc,
+			   irq->num, irq->hwirq, &desc->msg);
+}
+
 int vmm_msi_domain_alloc_irqs(struct vmm_msi_domain *domain,
 			      struct vmm_device *dev,
 			      int nvec)
 {
 	vmm_msi_alloc_info_t arg;
-	struct vmm_msi_msg msg;
 	struct vmm_msi_desc *desc;
 	int i, ret = VMM_OK, hwirq, hirq = -1;
 	struct vmm_msi_domain_ops *ops = domain->ops;
@@ -232,23 +286,22 @@ int vmm_msi_domain_alloc_irqs(struct vmm_msi_domain *domain,
 		ops->set_desc(&arg, desc);
 
 		hirq = vmm_host_irqdomain_alloc(domain->parent,
-						desc->nvec_used);
+						desc->nvec_used, &arg);
 		if (hirq < 0) {
 			ret = VMM_ENOSPC;
 			goto fail_handle_error;
 		}
 		hwirq = vmm_host_irqdomain_to_hwirq(domain->parent, hirq);
 		desc->hirq = hirq;
+		desc->domain = domain;
 
 		for (i = 0; i < desc->nvec_used; i++) {
+			vmm_host_irq_set_msi_data(hirq + i, desc);
 			ret = ops->msi_init(domain, hirq + i,
 					    hwirq + i, &arg);
 			if (ret < 0) {
-				if (ops->msi_free) {
-					for (i--; i > 0; i--)
-						ops->msi_free(domain,
-							hirq + i);
-				}
+				for (i--; i > 0; i--)
+					ops->msi_free(domain, hirq + i);
 				vmm_host_irqdomain_free(domain->parent,
 						desc->hirq, desc->nvec_used);
 				goto fail_handle_error;
@@ -256,32 +309,21 @@ int vmm_msi_domain_alloc_irqs(struct vmm_msi_domain *domain,
 		}
 	}
 
-	if (ops->msi_finish)
-		ops->msi_finish(&arg, 0);
+	ops->msi_finish(&arg, 0);
 
 	/* If everything went fine then we write MSI messages */
 	for_each_msi_entry(desc, dev) {
-		if (ops->msi_compose_msg && ops->msi_write_msg) {
-			hirq = desc->hirq;
-			hwirq = vmm_host_irqdomain_to_hwirq(domain->parent,
-							    hirq);
-			for (i = 0; i < desc->nvec_used; i++) {
-				ret = ops->msi_compose_msg(domain, desc,
-						hirq + i, hwirq + i, &msg);
-				BUG_ON(ret < 0);
-				ops->msi_write_msg(domain, desc,
-						hirq + i, hwirq + i, &msg);
-			}
+		for (i = 0; i < desc->nvec_used; i++) {
+			vmm_msi_domain_write_msg(
+					vmm_host_irq_get(desc->hirq + i));
 		}
 	}
 
 	return VMM_OK;
 
 fail_handle_error:
-	if (ops->handle_error)
-		ret = ops->handle_error(domain, desc, ret);
-	if (ops->msi_finish)
-		ops->msi_finish(&arg, ret);
+	ret = ops->handle_error(domain, desc, ret);
+	ops->msi_finish(&arg, ret);
 	return ret;
 }
 
@@ -289,15 +331,12 @@ void vmm_msi_domain_free_irqs(struct vmm_msi_domain *domain,
 			      struct vmm_device *dev)
 {
 	unsigned int i, hirq, hwirq;
-	struct vmm_msi_msg msg;
 	struct vmm_msi_desc *desc;
 	struct vmm_msi_domain_ops *ops;
 
 	if (!domain || !dev)
 		return;
-
 	ops = domain->ops;
-	memset(&msg, 0, sizeof(msg));
 
 	for_each_msi_entry(desc, dev) {
 		/*
@@ -312,17 +351,15 @@ void vmm_msi_domain_free_irqs(struct vmm_msi_domain *domain,
 		hirq = desc->hirq;
 		hwirq = vmm_host_irqdomain_to_hwirq(domain->parent, hirq);
 
-		if (ops->msi_write_msg) {
-			for (i = 0; i < desc->nvec_used; i++) {
-				ops->msi_write_msg(domain, desc,
-						hirq + i, hwirq + i, &msg);
-			}
+		memset(&desc->msg, 0, sizeof(desc->msg));
+
+		for (i = 0; i < desc->nvec_used; i++) {
+			ops->msi_write_msg(domain, desc,
+					   hirq + i, hwirq + i, &desc->msg);
 		}
 
-		if (ops->msi_free) {
-			for (i = 0; i < desc->nvec_used; i++) {
-				ops->msi_free(domain, hirq + i);
-			}
+		for (i = 0; i < desc->nvec_used; i++) {
+			ops->msi_free(domain, hirq + i);
 		}
 
 		vmm_host_irqdomain_free(domain->parent,

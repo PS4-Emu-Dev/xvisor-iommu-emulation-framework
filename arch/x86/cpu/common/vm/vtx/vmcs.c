@@ -32,11 +32,16 @@
 #include <vmm_error.h>
 #include <vmm_stdio.h>
 #include <vmm_manager.h>
+#include <cpu_interrupts.h>
 #include <cpu_features.h>
 #include <control_reg_access.h>
+#include <vmm_guest_aspace.h>
 #include <vm/vmcs.h>
 #include <vm/vmx.h>
 #include <vm/ept.h>
+#include <x86_debug_log.h>
+
+DEFINE_X86_DEBUG_LOG_SUBSYS_LEVEL(vmcs, X86_DEBUG_LOG_LVL_INFO);
 
 #define BYTES_PER_LONG (BITS_PER_LONG/8)
 
@@ -129,12 +134,12 @@ void vmx_detect_capability(void)
 	/* save the revision_id */
 	vmcs_revision_id = vmx_basic_msr_low;
 
-	VM_LOG(LVL_VERBOSE, "%s: Basic MSR: 0x%lx\n", __func__, cpu_read_msr(MSR_IA32_VMX_BASIC));
-	VM_LOG(LVL_VERBOSE, "%s: Basic low: 0x%x\n", __func__, vmx_basic_msr_low);
+	X86_DEBUG_LOG(vmcs, LVL_VERBOSE, "%s: Basic MSR: 0x%lx\n", __func__, cpu_read_msr(MSR_IA32_VMX_BASIC));
+	X86_DEBUG_LOG(vmcs, LVL_VERBOSE, "%s: Basic low: 0x%x\n", __func__, vmx_basic_msr_low);
 
 	vmxon_region_size = VMM_ROUNDUP2_PAGE_SIZE(vmx_basic_msr_high
 						   & 0x1ffful);
-	VM_LOG(LVL_VERBOSE, "%s: VMXON Region Size: 0x%x\n", __func__, vmxon_region_size);
+	X86_DEBUG_LOG(vmcs, LVL_VERBOSE, "%s: VMXON Region Size: 0x%x\n", __func__, vmxon_region_size);
 
 	vmxon_region_nr_pages = VMM_SIZE_TO_PAGE(vmxon_region_size);
 
@@ -200,7 +205,8 @@ void vmx_detect_capability(void)
 		    & (SECONDARY_EXEC_ENABLE_EPT
 		       | SECONDARY_EXEC_ENABLE_VPID)) {
 			vmx_ept_vpid_cap = cpu_read_msr(MSR_IA32_VMX_EPT_VPID_CAP);
-		}
+		} else
+			vmx_ept_vpid_cap = 0;
 	}
 
 	if (!vmx_pin_based_exec_control) {
@@ -208,7 +214,9 @@ void vmx_detect_capability(void)
 		vmcs_revision_id = vmx_basic_msr_low;
 		vmx_pin_based_exec_control = vmx_pin_based_exec_default1;
 		vmx_cpu_based_exec_control = vmx_cpu_based_exec_default1;
-		vmx_secondary_exec_control = vmx_secondary_exec_default1;
+		vmx_secondary_exec_control &= vmx_secondary_exec_default0;
+		vmx_secondary_exec_control &= vmx_secondary_exec_default1;
+		vmx_secondary_exec_control |= vmx_secondary_exec_default1;
 		vmx_vmexit_control	   = vmx_vmexit_default1;
 		vmx_vmentry_control	   = vmx_vmentry_default1;
 		cpu_has_vmx_ins_outs_instr_info = !!(vmx_basic_msr_high & (1U<<22));
@@ -252,13 +260,13 @@ struct vmcs *current_vmcs(physical_addr_t *phys)
 
         /* There is not current VMCS */
         if (!vmcs_phys || vmcs_phys == 0xFFFFFFFFFFFFFFFFULL) {
-                VM_LOG(LVL_ERR, "%s: There is not active(current) VMCS on this "
+                X86_DEBUG_LOG(vmcs, LVL_ERR, "%s: There is not active(current) VMCS on this "
 		       "logical processor.\n", __func__);
                 return NULL;
         }
 
         if (vmm_host_pa2va(vmcs_phys, &vmcs_virt) != VMM_OK) {
-                VM_LOG(LVL_ERR, "%s: Could not find virtual address for current VMCS\n", __func__);
+                X86_DEBUG_LOG(vmcs, LVL_ERR, "%s: Could not find virtual address for current VMCS\n", __func__);
                 return NULL;
         }
 
@@ -274,19 +282,19 @@ struct vmcs* create_vmcs(void)
 
 	/* IA-32 SDM Vol 3B: VMCS size is never greater than 4kB. */
 	if ((vmx_basic_msr_high & 0x1fff) > PAGE_SIZE) {
-		VM_LOG(LVL_ERR, "VMCS size larger than 4K\n");
+		X86_DEBUG_LOG(vmcs, LVL_ERR, "VMCS size larger than 4K\n");
 		return NULL;
 	}
 
 	/* IA-32 SDM Vol 3B: 64-bit CPUs always have VMX_BASIC_MSR[48]==0. */
 	if (vmx_basic_msr_high & (1u<<16)) {
-		VM_LOG(LVL_ERR, "VMX_BASIC_MSR[48] = 1\n");
+		X86_DEBUG_LOG(vmcs, LVL_ERR, "VMX_BASIC_MSR[48] = 1\n");
 		return NULL;
 	}
 
 	/* Require Write-Back (WB) memory type for VMCS accesses. */
 	if (((vmx_basic_msr_high >> 18) & 15) != 6) {
-		VM_LOG(LVL_ERR, "Write-back memory required for VMCS\n");
+		X86_DEBUG_LOG(vmcs, LVL_ERR, "Write-back memory required for VMCS\n");
 		return NULL;
 	}
 
@@ -300,49 +308,45 @@ struct vmcs* create_vmcs(void)
 
 static void vmcs_init_host_env(void)
 {
-	unsigned long cr0, cr4;
 	struct {
 		u16 limit;
 		u64 base;
 	} __attribute__ ((packed)) xdt;
 
-	/* Host data selectors. */
-	__vmwrite(HOST_SS_SELECTOR, VMM_DATA_SEG_SEL);
-	__vmwrite(HOST_DS_SELECTOR, VMM_DATA_SEG_SEL);
-	__vmwrite(HOST_ES_SELECTOR, VMM_DATA_SEG_SEL);
-	__vmwrite(HOST_FS_SELECTOR, VMM_DATA_SEG_SEL);
-	__vmwrite(HOST_GS_SELECTOR, VMM_DATA_SEG_SEL);
-	__vmwrite(HOST_FS_BASE, 0);
-	__vmwrite(HOST_GS_BASE, 0);
-
 	/* Host control registers. */
-	cr0 = read_cr0() | X86_CR0_TS;
-	__vmwrite(HOST_CR0, cr0);
+	__vmwrite(HOST_CR0, read_cr0());
+	__vmwrite(HOST_CR3, read_cr3());
+	__vmwrite(HOST_CR4, read_cr4());
 
-	cr4 = read_cr4() | X86_CR4_OSXSAVE;
-	__vmwrite(HOST_CR4, cr4);
+	/* Host data selectors. */
+	__vmwrite(HOST_CS_SELECTOR, (u16)VMM_CODE_SEG_SEL);
+	__vmwrite(HOST_SS_SELECTOR, 0);
+	__vmwrite(HOST_DS_SELECTOR, 0);
+	__vmwrite(HOST_ES_SELECTOR, 0);
+	__vmwrite(HOST_FS_SELECTOR, 0);
+	__vmwrite(HOST_GS_SELECTOR, 0);
+	__vmwrite(HOST_TR_SELECTOR, (u16)VMM_TSS_SEG_SEL);
 
-	/* Host CS:RIP. */
-	__vmwrite(HOST_CS_SELECTOR, VMM_CODE_SEG_SEL);
-	//__vmwrite(HOST_RIP, (unsigned long)vmx_asm_vmexit_handler);
-
-	/* Host SYSENTER CS:RIP. */
-	__vmwrite(HOST_SYSENTER_CS, 0);
-	__vmwrite(HOST_SYSENTER_EIP, 0);
-	__vmwrite(HOST_SYSENTER_ESP, 0);
+	__vmwrite(HOST_FS_BASE, 0);
+	__vmwrite(HOST_GS_BASE, read_msr(MSR_GS_BASE));
+	__vmwrite(HOST_TR_BASE, 0);
 
 	/* GDT */
 	__asm__ __volatile__ ("sgdt (%0) \n" :: "a"(&xdt) : "memory");
 	__vmwrite(HOST_GDTR_BASE, xdt.base);
 
+	vmm_printf("GDT Base: %lx limt: %u\n", xdt.base, xdt.limit);
 	/* IDT */
 	__asm__ __volatile__ ("sidt (%0) \n" :: "a"(&xdt) : "memory");
 	__vmwrite(HOST_IDTR_BASE, xdt.base);
+	vmm_printf("SIDT Base: %lx limt: %u\n", xdt.base, xdt.limit);
 
-	/* TR */
-	__vmwrite(HOST_TR_SELECTOR, VMM_DATA_SEG_SEL);
-	__vmwrite(HOST_TR_BASE, 0);
-
+	/* Host SYSENTER CS:RIP. */
+	__vmwrite(HOST_IA32_SYSENTER_CS, 0);
+	__vmwrite(HOST_IA32_SYSENTER_EIP, 0);
+	__vmwrite(HOST_IA32_SYSENTER_ESP, 0);
+	__vmwrite(HOST_IA32_PAT, read_msr(MSR_IA32_CR_PAT));
+	__vmwrite(HOST_IA32_EFER, EFER_LMA | EFER_LME);
 }
 
 void set_pin_based_exec_controls(void)
@@ -382,10 +386,6 @@ void set_pin_based_exec_controls(void)
 			break;
 
 		default:
-			/* we don't want to enable them by default so
-			 * consider the default settings. */
-			if (vmx_pin_based_exec_default1 & pin_controls[i])
-				vmx_pin_based_control |= pin_controls[i];
 			break;
 		}
 	}
@@ -471,18 +471,31 @@ void set_proc_based_exec_controls(void)
 			vmx_proc_based_control |= proc_controls[i];
 
 			if (proc_controls[i] == CPU_BASED_ACTIVATE_SECONDARY_CONTROLS) {
-				vmx_proc_secondary_control = (SECONDARY_EXEC_ENABLE_EPT |
-							      SECONDARY_EXEC_ENABLE_VPID |
-							      SECONDARY_EXEC_UNRESTRICTED_GUEST);
+				vmx_proc_secondary_control = 0;
+				if (!(SECONDARY_EXEC_ENABLE_EPT & vmx_secondary_exec_control)) {
+						vmm_panic("EPT is not allowed in secondary exec controls\n");
+				} else {
+					vmm_printf("Enabling EPT.\n");
+					vmx_proc_secondary_control |= SECONDARY_EXEC_ENABLE_EPT;
+				}
+				if (!(SECONDARY_EXEC_ENABLE_VPID & vmx_secondary_exec_control)) {
+					vmm_panic("VPID is not allowed in secondary exec controls\n");
+				} else {
+					vmm_printf("Enabling VPID\n");
+					vmx_proc_secondary_control |= SECONDARY_EXEC_ENABLE_VPID;
+				}
+				if (!(SECONDARY_EXEC_UNRESTRICTED_GUEST & vmx_secondary_exec_control)) {
+					vmm_panic("Unrestricted guest is not allowed in seconary exec controls\n");
+				} else {
+					vmm_printf("Enabling unrestricted guest.\n");
+					vmx_proc_secondary_control |= SECONDARY_EXEC_UNRESTRICTED_GUEST;
+				}
+
 				__vmwrite(SECONDARY_VM_EXEC_CONTROL, vmx_proc_secondary_control);
 			}
 			break;
 
 		default:
-			/* Others we don't want to enable them by default so
-			 * consider the default settings. */
-			if (vmx_cpu_based_exec_default1 & proc_controls[i])
-				vmx_proc_based_control |= proc_controls[i];
 			break;
 		}
 	}
@@ -529,11 +542,15 @@ void set_vmx_entry_exec_controls(void)
 
 		/* controls that allow 0 or 1 settings */
 		switch(entry_controls[i]) {
+		case VM_ENTRY_LOAD_DEBUG_CONTROLS:
+			vmx_entry_control |= entry_controls[i];
+			break;
+
+		case VM_ENTRY_DEACT_DUAL_MONITOR:
+			vmx_entry_control &= ~VM_ENTRY_DEACT_DUAL_MONITOR;
+			break;
+
 		default:
-			/* we don't want to enable them by default so
-			 * consider the default settings. */
-			if (vmx_vmentry_default1 & entry_controls[i])
-				vmx_entry_control |= entry_controls[i];
 			break;
 		}
 	}
@@ -593,10 +610,6 @@ void set_vmx_exit_exec_controls(void)
 			vmx_exit_control |= exit_controls[i];
 			break;
 		default:
-			/* we don't want to enable them by default so
-			 * consider the default settings. */
-			if (vmx_vmexit_default1 & exit_controls[i])
-				vmx_exit_control |= exit_controls[i];
 			break;
 		}
 	}
@@ -632,7 +645,7 @@ int vmx_set_control_params(struct vcpu_hw_context *context)
 
 	/* Set up the VCPU's guest extended page tables */
 	if ((rc = setup_ept(context)) != VMM_OK) {
-		VM_LOG(LVL_ERR, "EPT Setup failed with error: %d\n", rc);
+		X86_DEBUG_LOG(vmcs, LVL_ERR, "EPT Setup failed with error: %d\n", rc);
 		return rc;
 	}
 
@@ -647,8 +660,8 @@ int vmx_set_control_params(struct vcpu_hw_context *context)
 
 struct xgt_desc {
 	unsigned short size;
-	unsigned long address __attribute__((packed));
-};
+	unsigned long address;
+} __attribute__((packed));
 
 void vmx_save_host_state(struct vcpu_hw_context *context)
 {
@@ -686,33 +699,37 @@ void vmx_disable_intercept_for_msr(struct vcpu_hw_context *context, u32 msr)
 	}
 }
 
+#define GUEST_CRx_FILTER(x, __value)			\
+	({	u64 _v = __value;			\
+		(_v |= vmx_cr##x ##_fixed0);		\
+		(_v &= vmx_cr##x ##_fixed1);		\
+		(_v);					\
+	})
+
+#define DB_VECTOR                                       1
+#define NMI_VECTOR                                      2
+#define PF_VECTOR                                       14
+#define AC_VECTOR                                       17
+
+typedef union {
+	struct {
+		u32 ureserved:19;
+		u32 avl:1;
+		u32 res:4;
+		u32 present:1;
+		u32 dpl:2;
+		u32 dtype:1;
+		u32 stype:4;
+	} bits;
+	u32 val;
+} guest_ar_t;
+
 void vmx_set_vm_to_powerup_state(struct vcpu_hw_context *context)
 {
-	/* MSR intercepts. */
-	__vmwrite(VM_EXIT_MSR_LOAD_COUNT, 0);
-	__vmwrite(VM_EXIT_MSR_STORE_COUNT, 0);
-	__vmwrite(VM_ENTRY_MSR_LOAD_COUNT, 0);
-
-	__vmwrite(VM_ENTRY_INTR_INFO, 0);
-
-	__vmwrite(CR0_GUEST_HOST_MASK, ~0UL);
-	__vmwrite(CR4_GUEST_HOST_MASK, ~0UL);
-
-	__vmwrite(PAGE_FAULT_ERROR_CODE_MASK, 0);
-	__vmwrite(PAGE_FAULT_ERROR_CODE_MATCH, 0);
-
-	__vmwrite(CR3_TARGET_COUNT, 0);
-
-	__vmwrite(GUEST_ACTIVITY_STATE, 0);
-
-	/*
-	 * Make the CS.RIP point to 0xFFFF0. The reset vector. The Bios seems
-	 * to be linked in a fashion that the reset vectors lies at0x3fff0.
-	 * The guest physical address will be 0xFFFF0 when the first page fault
-	 * happens in paged real mode. Hence, the the bios is loaded at 0xc0c0000
-	 * so that 0xc0c0000 + 0x3fff0 becomes 0xc0ffff0 => The host physical
-	 * for reset vector. Everything else then just falls in place.
-	 */
+	/* Control registers */
+	__vmwrite(GUEST_CR0, (GUEST_CRx_FILTER(0, (X86_CR0_ET | X86_CR0_CD | X86_CR0_NW)) & ~(X86_CR0_PE | X86_CR0_PG)));
+	__vmwrite(GUEST_CR3, 0);
+	__vmwrite(GUEST_CR4, GUEST_CRx_FILTER(4, 0));
 
 	/* Guest segment bases. */
 	__vmwrite(GUEST_ES_BASE, 0);
@@ -721,8 +738,8 @@ void vmx_set_vm_to_powerup_state(struct vcpu_hw_context *context)
 	__vmwrite(GUEST_ES_SELECTOR, 0);
 
 	__vmwrite(GUEST_SS_BASE, 0);
-	__vmwrite(GUEST_SS_LIMIT, 0xFFFF);
-	__vmwrite(GUEST_SS_AR_BYTES, 0x193);
+	__vmwrite(GUEST_SS_LIMIT, 0);
+	__vmwrite(GUEST_SS_AR_BYTES, 0x93);
 	__vmwrite(GUEST_SS_SELECTOR, 0);
 
 	__vmwrite(GUEST_DS_BASE, 0);
@@ -740,155 +757,77 @@ void vmx_set_vm_to_powerup_state(struct vcpu_hw_context *context)
 	__vmwrite(GUEST_GS_AR_BYTES, 0x93);
 	__vmwrite(GUEST_GS_SELECTOR, 0);
 
-	__vmwrite(GUEST_CS_BASE, 0xF0000);
+	/*
+	 * Make the CS.RIP point to 0xFFFF0. The reset vector. The Bios seems
+	 * to be linked in a fashion that the reset vectors lies at0x3fff0.
+	 * The guest physical address will be 0xFFFF0 when the first page fault
+	 * happens in paged real mode. Hence, the the bios is loaded at 0xc0c0000
+	 * so that 0xc0c0000 + 0x3fff0 becomes 0xc0ffff0 => The host physical
+	 * for reset vector. Everything else then just falls in place.
+	 */
+	__vmwrite(GUEST_CS_BASE, 0);
 	__vmwrite(GUEST_CS_LIMIT, 0xFFFF);
-	__vmwrite(GUEST_CS_AR_BYTES, 0x19b);
-	__vmwrite(GUEST_CS_SELECTOR, 0xF000);
-
-	/* Guest IDT. */
-	__vmwrite(GUEST_IDTR_BASE, 0);
-	__vmwrite(GUEST_IDTR_LIMIT, 0);
-
-	/* Guest GDT. */
-	__vmwrite(GUEST_GDTR_BASE, 0);
-	__vmwrite(GUEST_GDTR_LIMIT, 0xFFFF);
-
-	/* Guest LDT. */
-	__vmwrite(GUEST_LDTR_AR_BYTES, 0x0082); /* LDT */
-	__vmwrite(GUEST_LDTR_SELECTOR, 0);
-	__vmwrite(GUEST_LDTR_BASE, 0);
-	__vmwrite(GUEST_LDTR_LIMIT, 0xFFFF);
-
-	/* Guest TSS. */
-	__vmwrite(GUEST_TR_AR_BYTES, 0x008b); /* 32-bit TSS (busy) */
-	__vmwrite(GUEST_TR_BASE, 0);
-	__vmwrite(GUEST_TR_LIMIT, 0xFFFF);
-
-	__vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0);
-	__vmwrite(GUEST_DR7, 0);
-	__vmwrite(VMCS_LINK_POINTER, ~0UL);
-
-	__vmwrite(EXCEPTION_BITMAP, 0);
-
-	/* Control registers */
-	__vmwrite(GUEST_CR0, (X86_CR0_ET | X86_CR0_CD | X86_CR0_NW | X86_CR0_PG));
-	__vmwrite(GUEST_CR3, 0);
-	__vmwrite(GUEST_CR4, 0);
-
-	/* G_PAT */
-	u64 host_pat, guest_pat;
-
-	host_pat = cpu_read_msr(MSR_IA32_CR_PAT);
-	guest_pat = MSR_IA32_CR_PAT_RESET;
-
-	__vmwrite(HOST_PAT, host_pat);
-	__vmwrite(GUEST_PAT, guest_pat);
+	__vmwrite(GUEST_CS_AR_BYTES, 0x93);
+	__vmwrite(GUEST_CS_SELECTOR, 0x0);
 
 	/* Initial state */
 	__vmwrite(GUEST_RSP, 0x0);
 	__vmwrite(GUEST_RFLAGS, 0x2);
 	__vmwrite(GUEST_RIP, 0xFFF0);
 
-	context->g_cr0 = (X86_CR0_ET | X86_CR0_CD | X86_CR0_NW);
-	context->g_cr1 = context->g_cr2 = context->g_cr3 = 0;
+	/* Guest IDT. */
+	__vmwrite(GUEST_IDTR_BASE, 0);
+	__vmwrite(GUEST_IDTR_LIMIT, 0xFFFF);
 
-	vmcs_dump(context);
-}
+	/* Guest GDT. */
+	__vmwrite(GUEST_GDTR_BASE, 0);
+	__vmwrite(GUEST_GDTR_LIMIT, 0xFFFF);
 
-void vmx_set_vm_to_mbr_start_state(struct vcpu_hw_context *context)
-{
+	/* Guest LDT. */
+	__vmwrite(GUEST_LDTR_AR_BYTES, 0x82); /* LDT */
+	__vmwrite(GUEST_LDTR_SELECTOR, 0);
+	__vmwrite(GUEST_LDTR_BASE, 0);
+	__vmwrite(GUEST_LDTR_LIMIT, 0xFFFF);
+
+	/* Guest TSS. */
+	__vmwrite(GUEST_TR_SELECTOR, 0);
+	__vmwrite(GUEST_TR_AR_BYTES, 0x8b); /* 32-bit TSS (busy) */
+	__vmwrite(GUEST_TR_BASE, 0);
+	__vmwrite(GUEST_TR_LIMIT, 0xFFFF);
+
+	__vmwrite(GUEST_IA32_EFER, 0);
+	__vmwrite(GUEST_SYSENTER_CS, 0);
+	__vmwrite(GUEST_SYSENTER_EIP, 0);
+	__vmwrite(GUEST_SYSENTER_ESP, 0);
+
+	__vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0);
+	__vmwrite(GUEST_DR7, 0x00000400);
+	__vmwrite(GUEST_IA32_DEBUGCTL, 0);
+	__vmwrite(VMCS_LINK_POINTER, ~0UL);
+
+	__vmwrite(EXCEPTION_BITMAP, (1 << DB_VECTOR) | (1 << AC_VECTOR));
+	__vmwrite(GUEST_PENDING_DBG_EXCEPTIONS, 0);
+
 	/* MSR intercepts. */
 	__vmwrite(VM_EXIT_MSR_LOAD_COUNT, 0);
 	__vmwrite(VM_EXIT_MSR_STORE_COUNT, 0);
 	__vmwrite(VM_ENTRY_MSR_LOAD_COUNT, 0);
 
-	__vmwrite(VM_ENTRY_INTR_INFO, 0);
+	__vmwrite(VM_ENTRY_INTR_INFO_FIELD, 0);
 
-	__vmwrite(CR0_GUEST_HOST_MASK, ~0UL);
+	__vmwrite(CR0_GUEST_HOST_MASK, 0UL);
+	__vmwrite(CR0_READ_SHADOW, 0UL);
 	__vmwrite(CR4_GUEST_HOST_MASK, ~0UL);
-
 	__vmwrite(PAGE_FAULT_ERROR_CODE_MASK, 0);
 	__vmwrite(PAGE_FAULT_ERROR_CODE_MATCH, 0);
-
 	__vmwrite(CR3_TARGET_COUNT, 0);
+	__vmwrite(GUEST_ACTIVITY_STATE, GUEST_ACTIVITY_ACTIVE);
+	__vmwrite(GUEST_IA32_PAT, 0);
 
-	__vmwrite(GUEST_ACTIVITY_STATE, 0);
+	context->g_cr0 = (X86_CR0_ET | X86_CR0_CD | X86_CR0_NW);
+	context->g_cr1 = context->g_cr2 = context->g_cr3 = 0;
 
-	/* Guest segment bases. */
-	__vmwrite(GUEST_ES_BASE, 0);
-	__vmwrite(GUEST_SS_BASE, 0);
-	__vmwrite(GUEST_DS_BASE, 00000400);
-	__vmwrite(GUEST_FS_BASE, 0xE7170);
-	__vmwrite(GUEST_GS_BASE, 0xF0000);
-	__vmwrite(GUEST_CS_BASE, 0);
-
-	/* Guest segment limits. */
-	__vmwrite(GUEST_ES_LIMIT, ~0u);
-	__vmwrite(GUEST_SS_LIMIT, ~0u);
-	__vmwrite(GUEST_DS_LIMIT, ~0u);
-	__vmwrite(GUEST_FS_LIMIT, ~0u);
-	__vmwrite(GUEST_GS_LIMIT, ~0u);
-	__vmwrite(GUEST_CS_LIMIT, ~0u);
-
-	/* Guest segment AR bytes. */
-	__vmwrite(GUEST_ES_AR_BYTES, 0x93);
-	__vmwrite(GUEST_SS_AR_BYTES, 0x193);
-	__vmwrite(GUEST_DS_AR_BYTES, 0x93);
-	__vmwrite(GUEST_FS_AR_BYTES, 0x93);
-	__vmwrite(GUEST_GS_AR_BYTES, 0x93);
-	__vmwrite(GUEST_CS_AR_BYTES, 0x19b);
-
-	/* Guest segment selector. */
-	__vmwrite(GUEST_ES_SELECTOR, 0);
-	__vmwrite(GUEST_SS_SELECTOR, 0);
-	__vmwrite(GUEST_DS_SELECTOR, 0x0040);
-	__vmwrite(GUEST_FS_SELECTOR, 0xE717);
-	__vmwrite(GUEST_GS_SELECTOR, 0xF000);
-	__vmwrite(GUEST_CS_SELECTOR, 0);
-
-	/* Guest IDT. */
-	__vmwrite(GUEST_IDTR_BASE, 0);
-	__vmwrite(GUEST_IDTR_LIMIT, 0);
-
-	/* Guest GDT. */
-	__vmwrite(GUEST_GDTR_BASE, 0);
-	__vmwrite(GUEST_GDTR_LIMIT, 0);
-
-	/* Guest LDT. */
-	__vmwrite(GUEST_LDTR_AR_BYTES, 0x0082); /* LDT */
-	__vmwrite(GUEST_LDTR_SELECTOR, 0);
-	__vmwrite(GUEST_LDTR_BASE, 0);
-	__vmwrite(GUEST_LDTR_LIMIT, 0);
-
-	/* Guest TSS. */
-	__vmwrite(GUEST_TR_AR_BYTES, 0x008b); /* 32-bit TSS (busy) */
-	__vmwrite(GUEST_TR_BASE, 0);
-	__vmwrite(GUEST_TR_LIMIT, 0xff);
-
-	__vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0);
-	__vmwrite(GUEST_DR7, 0);
-	__vmwrite(VMCS_LINK_POINTER, ~0UL);
-
-	__vmwrite(EXCEPTION_BITMAP, 0);
-
-	/* Control registers */
-	__vmwrite(GUEST_CR0, (X86_CR0_PE | X86_CR0_ET));
-	__vmwrite(GUEST_CR3, 0);
-	__vmwrite(GUEST_CR4, 0);
-
-	/* G_PAT */
-	u64 host_pat, guest_pat;
-
-	host_pat = cpu_read_msr(MSR_IA32_CR_PAT);
-	guest_pat = MSR_IA32_CR_PAT_RESET;
-
-	__vmwrite(HOST_PAT, host_pat);
-	__vmwrite(GUEST_PAT, guest_pat);
-
-	/* Initial state */
-	__vmwrite(GUEST_RSP, 0x3E2);
-	__vmwrite(GUEST_RFLAGS, 0x2206);
-	__vmwrite(GUEST_RIP, 0x7C00);
+	vmcs_dump(context);
 }
 
 int vmx_read_guest_msr(struct vcpu_hw_context *context, u32 msr, u64 *val)
@@ -981,14 +920,6 @@ int vmx_add_host_load_msr(struct vcpu_hw_context *context, u32 msr)
 	return 0;
 }
 
-static unsigned long vmr(unsigned long field)
-{
-	int rc;
-	unsigned long val;
-	val = __vmread_safe(field, &rc);
-	return rc ? 0 : val;
-}
-
 static void __unused vmx_dump_sel(char *name, u32 selector)
 {
 	u32 sel, attr, limit;
@@ -1015,7 +946,6 @@ static void __unused vmx_dump_sel2(char *name, u32 lim)
 
 void vmcs_dump(struct vcpu_hw_context *context)
 {
-	#if 0
 	unsigned long long x;
 
 	vmm_printf("*** Guest State ***\n");
@@ -1056,8 +986,17 @@ void vmcs_dump(struct vcpu_hw_context *context)
 	vmx_dump_sel("LDTR", GUEST_LDTR_SELECTOR);
 	vmx_dump_sel2("IDTR", GUEST_IDTR_LIMIT);
 	vmx_dump_sel("TR", GUEST_TR_SELECTOR);
+	vmm_printf("Fixed CR0: Fixed0:%llx Fixed1: %llx\n",
+		   (unsigned long long)vmx_cr0_fixed0,
+		   (unsigned long long)vmx_cr0_fixed1);
+	vmm_printf("Fixed CR4: Fixed0:%llx Fixed1: %llx\n",
+		   (unsigned long long)vmx_cr4_fixed0,
+		   (unsigned long long)vmx_cr4_fixed1);
+	vmm_printf("Exit Reason=%08x Exit Qualification=%08x\n",
+		   (u32)vmr(VM_EXIT_REASON),
+		   (u32)vmr(EXIT_QUALIFICATION));
 	vmm_printf("Guest PAT = 0x%08x%08x\n",
-		   (u32)vmr(GUEST_PAT_HIGH), (u32)vmr(GUEST_PAT));
+		   (u32)vmr(GUEST_IA32_PAT_HIGH), (u32)vmr(GUEST_IA32_PAT));
 	x  = (unsigned long long)vmr(TSC_OFFSET_HIGH) << 32;
 	x |= (u32)vmr(TSC_OFFSET);
 	vmm_printf("TSC Offset = %016llx\n", x);
@@ -1068,7 +1007,8 @@ void vmcs_dump(struct vcpu_hw_context *context)
 	vmm_printf("Interruptibility=%04x ActivityState=%04x\n",
 		   (int)vmr(GUEST_INTERRUPTIBILITY_INFO),
 		   (int)vmr(GUEST_ACTIVITY_STATE));
-
+	vmm_printf("VMENTRY Controls: 0x%08x, VMEXIT Controls: 0x%08x\n",
+		   (u32)vmr(VM_ENTRY_CONTROLS), (u32)vmr(VM_EXIT_CONTROLS));
 	vmm_printf("*** Host State ***\n");
 	vmm_printf("RSP = 0x%016llx  RIP = 0x%016llx\n",
 		   (unsigned long long)vmr(HOST_RSP),
@@ -1093,12 +1033,12 @@ void vmcs_dump(struct vcpu_hw_context *context)
 		   (unsigned long long)vmr(HOST_CR3),
 		   (unsigned long long)vmr(HOST_CR4));
 	vmm_printf("Sysenter RSP=%016llx CS:RIP=%04x:%016llx\n",
-		   (unsigned long long)vmr(HOST_SYSENTER_ESP),
-		   (int)vmr(HOST_SYSENTER_CS),
-		   (unsigned long long)vmr(HOST_SYSENTER_EIP));
+		   (unsigned long long)vmr(HOST_IA32_SYSENTER_ESP),
+		   (int)vmr(HOST_IA32_SYSENTER_CS),
+		   (unsigned long long)vmr(HOST_IA32_SYSENTER_EIP));
 	vmm_printf("Host PAT = 0x%08x%08x\n",
-		   (u32)vmr(HOST_PAT_HIGH), (u32)vmr(HOST_PAT));
-#endif
+		   (u32)vmr(HOST_IA32_PAT_HIGH), (u32)vmr(HOST_IA32_PAT));
+
 	vmm_printf("*** Control State ***\n");
 	vmm_printf("PinBased=%08x CPUBased=%08x SecondaryExec=%08x\n",
 		   (u32)vmr(PIN_BASED_VM_EXEC_CONTROL),
@@ -1110,7 +1050,7 @@ void vmcs_dump(struct vcpu_hw_context *context)
 	vmm_printf("ExceptionBitmap=%08x\n",
 		   (u32)vmr(EXCEPTION_BITMAP));
 	vmm_printf("VMEntry: intr_info=%08x errcode=%08x ilen=%08x\n",
-		   (u32)vmr(VM_ENTRY_INTR_INFO),
+		   (u32)vmr(VM_ENTRY_INTR_INFO_FIELD),
 		   (u32)vmr(VM_ENTRY_EXCEPTION_ERROR_CODE),
 		   (u32)vmr(VM_ENTRY_INSTRUCTION_LEN));
 	vmm_printf("VMExit: intr_info=%08x errcode=%08x ilen=%08x\n",
@@ -1121,7 +1061,7 @@ void vmcs_dump(struct vcpu_hw_context *context)
 		   (u32)vmr(VM_EXIT_REASON),
 		   (u32)vmr(EXIT_QUALIFICATION));
 	vmm_printf("IDTVectoring: info=%08x errcode=%08x\n",
-		   (u32)vmr(IDT_VECTORING_INFO),
+		   (u32)vmr(IDT_VECTORING_INFO_FIELD),
 		   (u32)vmr(IDT_VECTORING_ERROR_CODE));
 	vmm_printf("TPR Threshold = 0x%02x\n",
 		   (u32)vmr(TPR_THRESHOLD));
@@ -1129,4 +1069,16 @@ void vmcs_dump(struct vcpu_hw_context *context)
 		   (u32)vmr(EPT_POINTER_HIGH), (u32)vmr(EPT_POINTER));
 	vmm_printf("Virtual processor ID = 0x%04x\n",
 		   (u32)vmr(VIRTUAL_PROCESSOR_ID));
+
+	vmm_printf("*** DEFAULT CONTROL SETTINGS ***\n");
+	vmm_printf("pin-based default0: 0x%x default1: 0x%x\n",
+		   vmx_pin_based_exec_default0, vmx_pin_based_exec_default1);
+	vmm_printf("cpu-based default0: 0x%x default1: 0x%x\n",
+		   vmx_cpu_based_exec_default0, vmx_cpu_based_exec_default1);
+	vmm_printf("secondary-exec default0: 0x%x default1: 0x%x\n",
+		   vmx_secondary_exec_default0, vmx_secondary_exec_default1);
+	vmm_printf("vmexit default0: 0x%x default1: 0x%x\n",
+		   vmx_vmexit_default0, vmx_vmexit_default1);
+	vmm_printf("vmentry default0: 0x%x default1: 0x%x\n",
+		   vmx_vmentry_default0, vmx_vmentry_default1);
 }

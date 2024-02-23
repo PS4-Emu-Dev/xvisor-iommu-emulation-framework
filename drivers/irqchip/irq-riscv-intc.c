@@ -39,106 +39,54 @@
 #include <vmm_host_irq.h>
 #include <vmm_host_irqdomain.h>
 
-#include <cpu_sbi.h>
+#include <cpu_hwcap.h>
 #include <riscv_encoding.h>
 #include <riscv_csr.h>
 
 #define RISCV_IRQ_COUNT __riscv_xlen
 
-struct riscv_irqchip_intc {
-	struct vmm_host_irqdomain *domain;
-};
-
-static struct riscv_irqchip_intc intc __read_mostly;
+static struct vmm_host_irqdomain *intc_domain __read_mostly;
 
 static void riscv_irqchip_mask_irq(struct vmm_host_irq *d)
 {
-	csr_clear(sie, 1UL << d->hwirq);
+	if (d->hwirq < BITS_PER_LONG) {
+		csr_clear(CSR_SIE, BIT(d->hwirq));
+	} else {
+		csr_clear(CSR_SIEH, BIT(d->hwirq - BITS_PER_LONG));
+	}
 }
 
 static void riscv_irqchip_unmask_irq(struct vmm_host_irq *d)
 {
-	csr_set(sie, 1UL << d->hwirq);
+	if (d->hwirq < BITS_PER_LONG) {
+		csr_set(CSR_SIE, BIT(d->hwirq));
+	} else {
+		csr_set(CSR_SIEH, BIT(d->hwirq - BITS_PER_LONG));
+	}
 }
-
-static void riscv_irqchip_ack_irq(struct vmm_host_irq *d)
-{
-	csr_clear(sip, 1UL << d->hwirq);
-}
-
-#ifdef CONFIG_SMP
-static void riscv_irqchip_raise(struct vmm_host_irq *d,
-				const struct vmm_cpumask *mask)
-{
-	struct vmm_cpumask tmask;
-
-	if (d->hwirq != IRQ_S_SOFT)
-		return;
-
-	sbi_cpumask_to_hartmask(mask, &tmask);
-	sbi_send_ipi(vmm_cpumask_bits(&tmask));
-}
-#endif
 
 static struct vmm_host_irq_chip riscv_irqchip = {
 	.name = "riscv-intc",
 	.irq_mask = riscv_irqchip_mask_irq,
 	.irq_unmask = riscv_irqchip_unmask_irq,
-	.irq_ack = riscv_irqchip_ack_irq,
-#ifdef CONFIG_SMP
-	.irq_raise = riscv_irqchip_raise
-#endif
 };
 
-static void riscv_irqchip_register_irq(u32 hwirq, bool is_ipi,
-					struct vmm_host_irq_chip *chip)
+static u32 riscv_intc_aia_active_irq(u32 cpu_irq_no, u32 prev_irq)
 {
-	int irq = vmm_host_irqdomain_create_mapping(intc.domain, hwirq);
-
-	BUG_ON(irq < 0);
-
-	vmm_host_irq_mark_per_cpu(irq);
-	if (is_ipi) {
-		vmm_host_irq_mark_ipi(irq);
-	}
-	vmm_host_irq_set_chip(irq, chip);
-	vmm_host_irq_set_handler(irq, vmm_handle_percpu_irq);
+	unsigned long topi = csr_read(CSR_STOPI);
+	return (topi) ? topi >> TOPI_IID_SHIFT : UINT_MAX;
 }
 
-static u32 riscv_intc_active_irq(u32 cpu_irq_no)
+static u32 riscv_intc_active_irq(u32 cpu_irq_no, u32 prev_irq)
 {
-	if (RISCV_IRQ_COUNT <= cpu_irq_no) {
-		return UINT_MAX;
-	}
-
-	if (csr_read(sip) & (1UL << cpu_irq_no)) {
-		return cpu_irq_no;
-	}
-
+	if (cpu_irq_no != prev_irq)
+		return (cpu_irq_no < RISCV_IRQ_COUNT) ? cpu_irq_no : UINT_MAX;
 	return UINT_MAX;
 }
 
 static struct vmm_host_irqdomain_ops riscv_intc_ops = {
 	.xlate = vmm_host_irqdomain_xlate_onecell,
 };
-
-static int riscv_hart_of_timer(struct vmm_devtree_node *node, u32 *hart_id)
-{
-	int rc;
-
-	if (!node)
-		return VMM_EINVALID;
-	if (!vmm_devtree_is_compatible(node, "riscv"))
-		return VMM_ENODEV;
-
-	if (hart_id) {
-		rc = vmm_devtree_read_u32(node, "reg", hart_id);
-		if (rc)
-			return rc;
-	}
-
-	return VMM_OK;
-}
 
 static int riscv_intc_startup(struct vmm_cpuhp_notify *cpuhp, u32 cpu)
 {
@@ -157,33 +105,69 @@ static struct vmm_cpuhp_notify riscv_intc_cpuhp = {
 
 static int __init riscv_intc_init(struct vmm_devtree_node *node)
 {
-	int i, rc;
-	u32 hart_id = 0;
+	int i, irq, rc;
+	u32 nr_irqs, hart_id = 0;
 
-	rc = riscv_hart_of_timer(node->parent, &hart_id);
+	/* Get hart_id of associated HART */
+	rc = riscv_node_to_hartid(node->parent, &hart_id);
 	if (rc) {
+		vmm_lerror("riscv-intc",
+			   "can't find hart_id of asociated HART\n");
 		return rc;
 	}
 
+	/* Do nothing if associated HART is not boot HART */
 	if (vmm_smp_processor_id() != hart_id) {
 		return VMM_OK;
 	}
 
-	intc.domain = vmm_host_irqdomain_add(node, 0, RISCV_IRQ_COUNT,
+	/* Determine number of IRQs */
+	nr_irqs = BITS_PER_LONG;
+	if (riscv_isa_extension_available(NULL, SxAIA) && BITS_PER_LONG == 32)
+		nr_irqs = nr_irqs * 2;
+
+	/* Register IRQ domain */
+	intc_domain = vmm_host_irqdomain_add(node, 0, nr_irqs,
 					     &riscv_intc_ops, NULL);
-	if (!intc.domain) {
+	if (!intc_domain) {
+		vmm_lerror("riscv-intc", "failed to add irq domain\n");
 		return VMM_EFAIL;
 	}
 
-	/* Setup up per-CPU interrupts */
+	/* Create IRQ mappings */
 	for (i = 0; i < RISCV_IRQ_COUNT; i++) {
-		riscv_irqchip_register_irq(i, (i == IRQ_S_SOFT) ? TRUE : FALSE,
-					   &riscv_irqchip);
+		irq = vmm_host_irqdomain_create_mapping(intc_domain, i);
+		if (irq < 0) {
+			continue;
+		}
+
+		vmm_host_irq_mark_per_cpu(irq);
+		vmm_host_irq_set_chip(irq, &riscv_irqchip);
+		vmm_host_irq_set_handler(irq, vmm_handle_percpu_irq);
 	}
 
-	vmm_host_irq_set_active_callback(riscv_intc_active_irq);
+	/* Register CPU hotplug notifier */
+	rc = vmm_cpuhp_register(&riscv_intc_cpuhp, TRUE);
+	if (rc) {
+		vmm_lerror("riscv-intc", "failed to register cpuhp\n");
+		vmm_host_irqdomain_remove(intc_domain);
+		intc_domain = NULL;
+		return rc;
+	}
 
-	return vmm_cpuhp_register(&riscv_intc_cpuhp, TRUE);
+	/* Register active IRQ callback */
+	if (riscv_isa_extension_available(NULL, SxAIA)) {
+		vmm_host_irq_set_active_callback(riscv_intc_aia_active_irq);
+	} else {
+		vmm_host_irq_set_active_callback(riscv_intc_active_irq);
+	}
+
+	/* Announce RISC-V INTC */
+	vmm_init_printf("riscv-intc: registered %d local interrupts%s\n",
+			nr_irqs,
+			(riscv_isa_extension_available(NULL, SxAIA)) ?
+			" with AIA" : "");
+	return VMM_OK;
 }
 
 VMM_HOST_IRQ_INIT_DECLARE(riscvintc, "riscv,cpu-intc", riscv_intc_init);

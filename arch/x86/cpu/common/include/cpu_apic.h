@@ -26,6 +26,7 @@
 
 #include <vmm_types.h>
 #include <vmm_host_irq.h>
+#include <vmm_spinlocks.h>
 #include <libs/list.h>
 
 extern virtual_addr_t lapic_eoi_addr;
@@ -228,6 +229,7 @@ struct cpu_ioapic {
 };
 
 struct cpu_lapic {
+	vmm_spinlock_t lock;
 	u32 id;
 	physical_addr_t pbase;
 	virtual_addr_t vbase;
@@ -235,6 +237,7 @@ struct cpu_lapic {
 	u32 integrated;
 	u32 nr_lvt;
 	u32 version;
+	u32 deadline_supported;
 };
 
 union ioapic_irt_entry {

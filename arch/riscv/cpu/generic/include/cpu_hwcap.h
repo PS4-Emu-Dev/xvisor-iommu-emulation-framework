@@ -37,22 +37,49 @@
 #define RISCV_ISA_EXT_s		('s' - 'a')
 #define RISCV_ISA_EXT_u		('u' - 'a')
 
-#define RISCV_ISA_EXT_zicsr	(('z' - 'a') + 1)
-#define RISCV_ISA_EXT_zifencei	(('z' - 'a') + 2)
-#define RISCV_ISA_EXT_zam	(('z' - 'a') + 3)
-#define RISCV_ISA_EXT_ztso	(('z' - 'a') + 4)
+/*
+ * Increse this to higher value as kernel support more ISA extensions.
+ */
+#define RISCV_ISA_EXT_MAX	64
+#define RISCV_ISA_EXT_NAME_LEN_MAX 32
 
-#define RISCV_ISA_EXT_MAX	256
+/* The base ID for multi-letter ISA extensions */
+#define RISCV_ISA_EXT_BASE 26
+
+/*
+ * This enum represent the logical ID for each multi-letter
+ * RISC-V ISA extension. The logical ID should start from
+ * RISCV_ISA_EXT_BASE and must not exceed RISCV_ISA_EXT_MAX.
+ * 0-25 range is reserved for single letter extensions while
+ * all the multi-letter extensions should define the next
+ * available logical extension id.
+ */
+enum riscv_isa_ext_id {
+	RISCV_ISA_EXT_SSAIA = RISCV_ISA_EXT_BASE,
+	RISCV_ISA_EXT_SMAIA,
+	RISCV_ISA_EXT_SSTC,
+	RISCV_ISA_EXT_ID_MAX = RISCV_ISA_EXT_MAX,
+};
+
+#define RISCV_ISA_EXT_SxAIA		RISCV_ISA_EXT_SSAIA
+
+struct vmm_devtree_node;
 
 /**
- * Get base extension word
+ * Get hart id from HART device tree node
  *
- * @isa_bitmap ISA bitmap to use
- * @returns base extension word as unsigned long value
- *
- * NOTE: If isa_bitmap is NULL then Host ISA bitmap will be used.
+ * @node HART device tree node
+ * @hart_id output hart id
+ * @returns VMM_OK upon success and VMM_Exxx upon failure
  */
-unsigned long riscv_isa_extension_base(const unsigned long *isa_bitmap);
+int riscv_node_to_hartid(struct vmm_devtree_node *node, u32 *hart_id);
+
+/**
+ * Get host ISA extension bitmap
+ *
+ * @returns const pointer to host ISA extension bitmap
+ */
+const unsigned long *riscv_isa_extension_host(void);
 
 #define riscv_isa_extension_mask(ext) BIT_MASK(RISCV_ISA_EXT_##ext)
 
@@ -101,8 +128,18 @@ int riscv_isa_parse_string(const char *isa,
 /** RISC-V XLEN */
 extern unsigned long riscv_xlen;
 
-/** Available RISC-V VMID bits */
-extern unsigned long riscv_vmid_bits;
+/** RISC-V Stage2 MMU mode */
+extern unsigned long riscv_stage2_mode;
+
+/** RISC-V Stage2 VMID bits */
+extern unsigned long riscv_stage2_vmid_bits;
+
+/** RISC-V Stage2 VMID nested */
+extern unsigned long riscv_stage2_vmid_nested;
+
+/** RISC-V Stage2 VMID available for Guest */
+#define riscv_stage2_vmid_available() \
+	(CONFIG_MAX_GUEST_COUNT <= riscv_stage2_vmid_nested)
 
 /** RISC-V Time Base Frequency */
 extern unsigned long riscv_timer_hz;

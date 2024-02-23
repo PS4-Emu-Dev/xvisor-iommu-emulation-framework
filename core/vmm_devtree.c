@@ -464,12 +464,18 @@ int vmm_devtree_read_u8_atindex(const struct vmm_devtree_node *node,
 {
 	u32 asz;
 	const u8 *aval;
+	struct vmm_devtree_attr *attr;
 
 	if (!node || !attrib || !out || (index<0)) {
 		return VMM_EINVALID;
 	}
 
-	aval = vmm_devtree_attrval(node, attrib);
+	attr = vmm_devtree_getattr(node, attrib);
+	if (!attr) {
+		return VMM_EINVALID;
+	}
+
+	aval = attr->value;
 	if (!aval) {
 		return VMM_ENOTAVAIL;
 	}
@@ -489,12 +495,18 @@ int vmm_devtree_read_u8_array(const struct vmm_devtree_node *node,
 {
 	u32 i, asz;
 	const u8 *aval;
+	struct vmm_devtree_attr *attr;
 
 	if (!node || !attrib || !out || !sz) {
 		return VMM_EINVALID;
 	}
 
-	aval = vmm_devtree_attrval(node, attrib);
+	attr = vmm_devtree_getattr(node, attrib);
+	if (!attr) {
+		return VMM_EINVALID;
+	}
+
+	aval = attr->value;
 	if (!aval) {
 		return VMM_ENOTAVAIL;
 	}
@@ -517,12 +529,18 @@ int vmm_devtree_read_u16_atindex(const struct vmm_devtree_node *node,
 	bool found;
 	u32 i, s, asz;
 	const void *aval;
+	struct vmm_devtree_attr *attr;
 
 	if (!node || !attrib || !out || (index<0)) {
 		return VMM_EINVALID;
 	}
 
-	aval = vmm_devtree_attrval(node, attrib);
+	attr = vmm_devtree_getattr(node, attrib);
+	if (!attr) {
+		return VMM_EINVALID;
+	}
+
+	aval = attr->value;
 	if (!aval) {
 		return VMM_ENOTAVAIL;
 	}
@@ -565,12 +583,18 @@ int vmm_devtree_read_u16_array(const struct vmm_devtree_node *node,
 {
 	u32 i, s, asz;
 	const void *aval;
+	struct vmm_devtree_attr *attr;
 
 	if (!node || !attrib || !out || (sz<=0)) {
 		return VMM_EINVALID;
 	}
 
-	aval = vmm_devtree_attrval(node, attrib);
+	attr = vmm_devtree_getattr(node, attrib);
+	if (!attr) {
+		return VMM_EINVALID;
+	}
+
+	aval = attr->value;
 	if (!aval) {
 		return VMM_ENOTAVAIL;
 	}
@@ -609,12 +633,18 @@ int vmm_devtree_read_u32_atindex(const struct vmm_devtree_node *node,
 	bool found;
 	u32 i, s, asz;
 	const void *aval;
+	struct vmm_devtree_attr *attr;
 
 	if (!node || !attrib || !out || (index<0)) {
 		return VMM_EINVALID;
 	}
 
-	aval = vmm_devtree_attrval(node, attrib);
+	attr = vmm_devtree_getattr(node, attrib);
+	if (!attr) {
+		return VMM_EINVALID;
+	}
+
+	aval = attr->value;
 	if (!aval) {
 		return VMM_ENOTAVAIL;
 	}
@@ -660,12 +690,18 @@ int vmm_devtree_read_u32_array(const struct vmm_devtree_node *node,
 {
 	u32 i, s, asz;
 	const void *aval;
+	struct vmm_devtree_attr *attr;
 
 	if (!node || !attrib || !out || (sz<=0)) {
 		return VMM_EINVALID;
 	}
 
-	aval = vmm_devtree_attrval(node, attrib);
+	attr = vmm_devtree_getattr(node, attrib);
+	if (!attr) {
+		return VMM_EINVALID;
+	}
+
+	aval = attr->value;
 	if (!aval) {
 		return VMM_ENOTAVAIL;
 	}
@@ -707,12 +743,18 @@ int vmm_devtree_read_u64_atindex(const struct vmm_devtree_node *node,
 	bool found;
 	u32 i, s, asz;
 	const void *aval;
+	struct vmm_devtree_attr *attr;
 
 	if (!node || !attrib || !out || (index<0)) {
 		return VMM_EINVALID;
 	}
 
-	aval = vmm_devtree_attrval(node, attrib);
+	attr = vmm_devtree_getattr(node, attrib);
+	if (!attr) {
+		return VMM_EINVALID;
+	}
+
+	aval = attr->value;
 	if (!aval) {
 		return VMM_ENOTAVAIL;
 	}
@@ -761,12 +803,18 @@ int vmm_devtree_read_u64_array(const struct vmm_devtree_node *node,
 {
 	u32 i, s, asz;
 	const void *aval;
+	struct vmm_devtree_attr *attr;
 
 	if (!node || !attrib || !out || (sz<=0)) {
 		return VMM_EINVALID;
 	}
 
-	aval = vmm_devtree_attrval(node, attrib);
+	attr = vmm_devtree_getattr(node, attrib);
+	if (!attr) {
+		return VMM_EINVALID;
+	}
+
+	aval = attr->value;
 	if (!aval) {
 		return VMM_ENOTAVAIL;
 	}
@@ -1231,8 +1279,7 @@ const struct vmm_devtree_nodeid *vmm_devtree_match_node(
 	while (matches->name[0] || matches->type[0] || matches->compatible[0]) {
 		int match = 1;
 		if (matches->name[0])
-			match &= node->name &&
-				 !strcmp(matches->name, node->name);
+			match &= !strcmp(matches->name, node->name);
 		if (matches->type[0])
 			match &= type && !strcmp(matches->type, type);
 		if (matches->compatible[0])
@@ -1688,7 +1735,7 @@ struct vmm_devtree_node *vmm_devtree_get_child_by_name(
 	struct vmm_devtree_node *ret = NULL, *child = NULL;
 
 	vmm_devtree_for_each_child(child, node) {
-		if (child->name && (strcasecmp(child->name, name) == 0)) {
+		if (strcasecmp(child->name, name) == 0) {
 			ret = child;
 			break;
 		}

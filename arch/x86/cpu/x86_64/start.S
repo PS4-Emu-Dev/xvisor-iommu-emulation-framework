@@ -30,6 +30,8 @@ mboot:
         .int _code_end
         .int 0
 	.int _start_32
+	.int 0
+	.int 1024, 768, 32 /* width, height, depth */
 
 .code32 /* 32-bit code */
 .section .bootstrap.text, "ax"
@@ -38,6 +40,19 @@ mboot:
 
 _start_32:
         cli /* no interrupts please. */
+	/*
+	 * Mask the interrupts in PIC and re-enable the interrupts.
+	 * This is required to boot in bochs because later when
+	 * Interrupts are enabled, the latched interrupts are played
+	 * before the LAPIC is setup. This timer interrupts comes
+	 * at the vector configured by Grub which is 8. Xvisor treats
+	 * this as a Double-fault and halts.
+	 */
+	mov $0xff, %al
+	out %al, $0x21
+	out %al, $0xa1
+	sti
+	cli
 	leal	_bootstrap_stack_start, %esp	/* setup the stack (bss segment) */
 
 	movl    %ebx, %esi
@@ -167,7 +182,7 @@ __fill_IMP_table:
         addl     $4096, -4(%ebp)
         addl     $4096, -8(%ebp)
         subl     $1, -12(%ebp)
-        cmp      $0, -12(%ebp)
+        cmpl     $0, -12(%ebp)
         ja      __fill_IMP_table
         leave
         ret
@@ -308,6 +323,11 @@ __pgdi:
 __pgti:
 	.zero	(PAGE_SIZE * NR_PGTI_PAGES)
 
+__early_iodev_pages:
+	.globl __early_iodev_pages
+	.align 32
+	.type __early_iodev_pages, @object
+	.zero (PAGE_SIZE * NR_IODEV_PAGES)
 
 .align 4
 	.type   _mboot_info, @object

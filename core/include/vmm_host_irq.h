@@ -60,6 +60,7 @@ enum vmm_irq_trigger_types {
  * @VMM_IRQ_STATE_ROUTED		- Interrupt is routed to some guest
  * @VMM_IRQ_STATE_IPI			- Interrupt is an inter-processor interrupt
  * @VMM_IRQ_STATE_EXTENDED		- Interrupt is an extended interrupt
+ * @VMM_IRQ_STATE_CHAINED		- Interrupt is a chained interrupt
  */
 enum vmm_irq_states {
 	VMM_IRQ_STATE_TRIGGER_MASK	= 0xf,
@@ -69,6 +70,7 @@ enum vmm_irq_states {
 	VMM_IRQ_STATE_ROUTED		= (1 << 14),
 	VMM_IRQ_STATE_IPI		= (1 << 15),
 	VMM_IRQ_STATE_EXTENDED		= (1 << 16),
+	VMM_IRQ_STATE_CHAINED		= (1 << 17),
 };
 
 /**
@@ -104,6 +106,7 @@ enum vmm_irq_return {
 };
 
 struct vmm_host_irq;
+struct vmm_msi_msg;
 
 typedef enum vmm_irq_return vmm_irq_return_t;
 typedef void (*vmm_host_irq_handler_t)(struct vmm_host_irq *, u32, void *);
@@ -125,6 +128,7 @@ struct vmm_host_irq_action {
  * @irq_eoi:              end of interrupt
  * @irq_set_affinity:     set the CPU affinity on SMP machines
  * @irq_set_type:         set the flow type (VMM_IRQ_TYPE_LEVEL/etc.) of an IRQ
+ * @irq_compose_msi_msg:  compose MSI message for given interrupt source
  * @irq_get_routed_state: get the routed state of an IRQ
  * @irq_set_routed_state: set the routed state of an IRQ
  */
@@ -143,6 +147,8 @@ struct vmm_host_irq_chip {
 	int  (*irq_set_type)(struct vmm_host_irq *irq, u32 flow_type);
 	void (*irq_raise)(struct vmm_host_irq *irq,
 			  const struct vmm_cpumask *dest);
+	void (*irq_compose_msi_msg)(struct vmm_host_irq *irq,
+				    struct vmm_msi_msg *msg);
 	u32  (*irq_get_routed_state)(struct vmm_host_irq *irq, u32 mask);
 	void (*irq_set_routed_state)(struct vmm_host_irq *irq,
 				     u32 val, u32 mask);
@@ -159,6 +165,7 @@ struct vmm_host_irq {
 	u32 count[CONFIG_CPU_COUNT];
 	void *chip_data;
 	struct vmm_host_irq_chip *chip;
+	void *msi_data;
 	vmm_host_irq_handler_t handler;
 	void *handler_data;
 	vmm_rwlock_t action_lock[CONFIG_CPU_COUNT];
@@ -184,7 +191,7 @@ int vmm_host_generic_irq_exec(u32 hirq_no);
 int vmm_host_active_irq_exec(u32 cpu_irq_no);
 
 /** Set callback for retriving active host irq number */
-void vmm_host_irq_set_active_callback(u32 (*active)(u32));
+void vmm_host_irq_set_active_callback(u32 (*active)(u32, u32));
 
 /** Initialize host irq instance
  *  Note: This function is for internal use only.
@@ -219,6 +226,12 @@ int vmm_host_irq_set_chip_data(u32 hirq, void *chip_data);
 
 /** Get host irq chip data from host irq instance */
 void *vmm_host_irq_get_chip_data(struct vmm_host_irq *irq);
+
+/** Set host irq MSI data for given host irq number */
+int vmm_host_irq_set_msi_data(u32 hirq, void *msi_data);
+
+/** Get host irq MSI data from host irq instance */
+void *vmm_host_irq_get_msi_data(struct vmm_host_irq *irq);
 
 /** Set host irq handler for given host irq number
  *  NOTE: For second argument, mention one of the
@@ -315,6 +328,12 @@ static inline bool vmm_host_irq_is_ipi(struct vmm_host_irq *irq)
 	return (irq->state & VMM_IRQ_STATE_IPI) ? TRUE : FALSE;
 }
 
+/** Check if a host irq is a chained interrupt */
+static inline bool vmm_host_irq_is_chained(struct vmm_host_irq *irq)
+{
+	return (irq->state & VMM_IRQ_STATE_CHAINED) ? TRUE : FALSE;
+}
+
 /** Check if a host irq is masked */
 bool vmm_host_irq_is_masked(struct vmm_host_irq *irq);
 
@@ -382,6 +401,12 @@ int vmm_host_irq_mark_ipi(u32 hirq);
 /** UnMark host irq as inter-processor interrupt */
 int vmm_host_irq_unmark_ipi(u32 hirq);
 
+/** Mark host irq as chained interrupt */
+int vmm_host_irq_mark_chained(u32 hirq);
+
+/** UnMark host irq as chained interrupt */
+int vmm_host_irq_unmark_chained(u32 hirq);
+
 /** Unmask a host irq (by default all irqs are masked) */
 int vmm_host_irq_unmask(u32 hirq);
 
@@ -403,6 +428,9 @@ static inline int vmm_host_irq_disable(u32 hirq)
 /** Raise a host irq from software */
 int vmm_host_irq_raise(u32 hirq,
 		       const struct vmm_cpumask *dest);
+
+/** Compose a MSI message for given host irq */
+int vmm_host_irq_compose_msi_msg(u32 hirq, struct vmm_msi_msg *msg);
 
 /** Find a host irq with matching state mask */
 int vmm_host_irq_find(u32 hirq_start, u32 state_mask, u32 *hirq);

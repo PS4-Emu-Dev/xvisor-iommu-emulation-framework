@@ -16,37 +16,32 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * @file cpu_vcpu_switch.S
+ * @file cpu_vcpu_unpriv.S
  * @author Anup Patel (anup.patel@wdc.com)
- * @brief RISC-V low-level VCPU save/restore functions
+ * @brief RISC-V low-level unpriv access functions
  */
 
+#include <cpu_vcpu_trap.h>
 #include <riscv_asm.h>
 #include <riscv_encoding.h>
 
-.macro SETUP_CSR __sstatus, __hstatus
-	/* Load MXR bit value */
-	li	\__hstatus, SSTATUS_MXR
-
-	/* Save SSTATUS and set MXR bit */
-	csrrs	\__sstatus, CSR_SSTATUS, \__hstatus
-
-	/* Save HSTATUS and set SPRV bit */
-	csrrsi	\__hstatus, CSR_HSTATUS, HSTATUS_SPRV
+.macro TRAP_HANDLER __insn_len __ttmp, __taddr
+	csrr	\__ttmp, CSR_SEPC
+	REG_S	\__ttmp, RISCV_VCPU_TRAP_SEPC(\__taddr)
+	addi	\__ttmp, \__ttmp, \__insn_len
+	csrw	CSR_SEPC, \__ttmp
+	csrr	\__ttmp, CSR_SCAUSE
+	REG_S	\__ttmp, RISCV_VCPU_TRAP_SCAUSE(\__taddr)
+	csrr	\__ttmp, CSR_STVAL
+	REG_S	\__ttmp, RISCV_VCPU_TRAP_STVAL(\__taddr)
+	csrr	\__ttmp, CSR_HTVAL
+	REG_S	\__ttmp, RISCV_VCPU_TRAP_HTVAL(\__taddr)
+	csrr	\__ttmp, CSR_HTINST
+	REG_S	\__ttmp, RISCV_VCPU_TRAP_HTINST(\__taddr)
+	sret
 .endm
 
-.macro RESTORE_CSR __sstatus, __hstatus
-	/* Restore HSTATUS */
-	csrw	CSR_HSTATUS, \__hstatus
-
-	/* Restore SSTATUS */
-	csrw	CSR_SSTATUS, \__sstatus
-.endm
-
-.macro SETUP_TRAP __insn_len, __stvec, __tscause
-	/* Setup registers for unprivilege access trap handling */
-	add	\__tscause, zero, zero
-
+.macro SETUP_TRAP __insn_len, __stvec, __ttmp, __taddr
 	/* Change to Temporary exception handler */
 	la	\__stvec, 998f
 	csrrw	\__stvec, CSR_STVEC, \__stvec
@@ -55,11 +50,7 @@
 	/* Temporary exception handler */
 	.align 2
 998:
-	csrr	\__tscause, CSR_SEPC
-	addi	\__tscause, \__tscause, \__insn_len
-	csrw	CSR_SEPC, \__tscause
-	csrr	\__tscause, CSR_SCAUSE
-	sret
+	TRAP_HANDLER \__insn_len, \__ttmp, \__taddr
 999:
 .endm
 
@@ -68,44 +59,48 @@
 	csrw	CSR_STVEC, \__stvec
 .endm
 
-.macro SETUP_UNPRIV __insn_len, __sstatus, __hstatus, __stvec, __tscause
-	/* Setup CSRs */
-	SETUP_CSR \__sstatus, \__hstatus
-
+.macro SETUP_UNPRIV __insn_len, __stvec, __ttmp, __taddr
 	/* Setup Trap */
-	SETUP_TRAP \__insn_len, \__stvec, \__tscause
+	SETUP_TRAP \__insn_len, \__stvec, \__ttmp, \__taddr
 .endm
 
-.macro CLEANUP_UNPRIV __sstatus, __hstatus, __stvec
+.macro CLEANUP_UNPRIV __stvec
 	/* Restore Trap */
 	RESTORE_TRAP \__stvec
-
-	/* Restore CSRs */
-	RESTORE_CSR \__sstatus, \__hstatus
 .endm
+
+	.align 3
+	.global __cpu_vcpu_unpriv_trap_handler
+__cpu_vcpu_unpriv_trap_handler:
+	TRAP_HANDLER 4, t0, t1
 
 	.align 3
 	.global __cpu_vcpu_unpriv_read_insn
 __cpu_vcpu_unpriv_read_insn:
 	/* Setup unprivilege access */
-	SETUP_UNPRIV 4, t0, t1, t2, t3
+	SETUP_UNPRIV 4, t0, t1, a1
 
-	/* Read instruction (only t4, t5 and t6 registers available) */
+	/*
+	 * Read instruction (only t2, t3, t4, t5 and t6 registers available)
+	 *
+	 * HLVX.HU instruction
+	 * 0110010 00011 rs1 100 rd 1110011
+	 */
 	add	t5, a0, zero
-	lhu	a0, (t5)
+	/* HLVX.HU a0, (t5) */
+	.word	0x643f4573
 	andi	t6, a0, 3
 	addi	t6, t6, -3
 	bne	t6, zero, 2f
-	lhu	t6, 2(t5)
+	addi	t5, t5, 2
+	/* HLVX.HU t6, (t5) */
+	.word	0x643f4ff3
 	sll	t6, t6, 16
 	add	a0, a0, t6
 2:
 
 	/* Cleanup unprivilege access */
-	CLEANUP_UNPRIV t0, t1, t2
-
-	/* Return trap details */
-	REG_S	t3, (a1)
+	CLEANUP_UNPRIV t0
 
 	/* Return to C code */
 	ret
@@ -114,16 +109,27 @@ __cpu_vcpu_unpriv_read_insn:
 	.global __cpu_vcpu_unpriv_read_ulong
 __cpu_vcpu_unpriv_read_ulong:
 	/* Setup unprivilege access */
-	SETUP_UNPRIV 2, t0, t1, t2, t3
+	SETUP_UNPRIV 2, t0, t1, a1
 
-	/* Read unsigned long (only t4, t5 and t6 registers available) */
-	REG_L	a0, (a0)
+	/*
+	 * Read instruction (only t2, t3, t4, t5 and t6 registers available)
+	 *
+	 * HLV.D instruction
+	 * 0110110 00000 rs1 100 rd 1110011
+	 *
+	 * HLV.W instruction
+	 * 0110100 00000 rs1 100 rd 1110011
+	 */
+#ifdef CONFIG_64BIT
+	/* HLV.D a0, (a0) */
+	.word	0x6c054573
+#else
+	/* HLV.W a0, (a0) */
+	.word	0x68054573
+#endif
 
 	/* Cleanup unprivilege access */
-	CLEANUP_UNPRIV t0, t1, t2
-
-	/* Return trap details */
-	REG_S	t3, (a1)
+	CLEANUP_UNPRIV t0
 
 	/* Return to C code */
 	ret

@@ -41,6 +41,9 @@
 		STDOUT: vga {
 		};
 
+		STDOUTFB: fb {
+		};
+
 		SERIAL0: uart0 {
 			compatible = "ns8250";
 			reg = <0x3f8>;
@@ -72,12 +75,10 @@
 	chosen {
 		console = &SERIAL0;
 		bootcmd = "echo Waiting for 3 seconds to let block devices settle down...",
-			  "sleep 3", /* Let block devices settle down */
+			  "sleep secs 3", /* Let block devices settle down */
 			  "vfs mount hda0p0 /",
 
 			  /* Kick off the startup script */
 			  "vfs run /system/init/startup";
 	};
 };
-
-/include/ "../../../guests/x86_64_guest.dtsi"

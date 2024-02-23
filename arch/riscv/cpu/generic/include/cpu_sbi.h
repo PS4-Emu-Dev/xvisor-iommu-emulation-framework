@@ -73,7 +73,7 @@ int sbi_console_getchar(void);
 /**
  * Remove all the harts from executing supervisor code.
  */
-void sbi_shutdown(void);
+int sbi_shutdown(void);
 
 /**
  * Clear any pending IPIs for the calling HART.
@@ -215,5 +215,19 @@ unsigned long sbi_minor_version(void);
  * @return VMM_OK on success AND VMM_Exxx error code on failure
  */
 int sbi_init(void);
+
+#ifdef CONFIG_SMP
+/**
+ * Initialize SBI IPI driver
+ *
+ * @return VMM_OK on success AND VMM_Exxx error code on failure
+ */
+int sbi_ipi_init(void);
+#else
+static inline int sbi_ipi_init(void)
+{
+	return 0;
+}
+#endif
 
 #endif

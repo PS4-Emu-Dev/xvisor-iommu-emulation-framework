@@ -677,8 +677,9 @@ skip_state_change:
 				vmm_scheduler_switch(schedp, schedp->irq_regs);
 			} else {
 				arch_vcpu_preempt_orphan();
-				if (vcpu->wq_lock) {
-					vmm_spin_lock(vcpu->wq_lock);
+				if (schedp->current_vcpu->wq_lock) {
+					vmm_spin_lock(
+						schedp->current_vcpu->wq_lock);
 				}
 			}
 		} else {
@@ -829,6 +830,13 @@ void vmm_scheduler_irq_enter(arch_regs_t *regs, bool vcpu_context)
 
 	/* Ensure that yield on exit is disabled */
 	schedp->yield_on_irq_exit = FALSE;
+}
+
+arch_regs_t *vmm_scheduler_irq_regs(void)
+{
+	struct vmm_scheduler_ctrl *schedp = &this_cpu(sched);
+
+	return schedp->irq_regs;
 }
 
 void vmm_scheduler_irq_exit(arch_regs_t *regs)

@@ -72,6 +72,7 @@ bool cpu_vcpu_cp15_read(struct vmm_vcpu *vcpu,
 				break;
 			case ARM_CPUID_CORTEXA7:
 			case ARM_CPUID_CORTEXA15:
+			case ARM_CPUID_ARMV7:
 				*data = 0;
 				if (arm_feature(vcpu, ARM_FEATURE_V7MP)) {
 					*data |= (1 << 6);
@@ -572,7 +573,7 @@ int cpu_vcpu_cp15_init(struct vmm_vcpu *vcpu, u32 cpuid)
 		break;
 	case ARM_CPUID_ARMV7:
 		cp15->c0_midr = read_midr();
-		cp15->c0_mpidr = vcpu->subid;
+		cp15->c0_mpidr = (1 << 31) | vcpu->subid;
 		cp15->c1_sctlr = 0x00c50078;
 		break;
 	default:
